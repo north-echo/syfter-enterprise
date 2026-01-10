@@ -15,10 +15,11 @@ RH-Syfter wraps the Anchore Syft tool to:
 ## Prerequisites
 
 - **Python 3.9+**
-- **Syft** - Install from [GitHub releases](https://github.com/anchore/syft/releases) or:
+- **Syft** - Install from [GitHub releases](https://github.com/anchore/syft/releases), Homebrew, or:
   ```bash
   curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
   ```
+- **Skopeo** - Can be installed via dnf or Homebrew, see [GitHub installation instructions](https://github.com/containers/skopeo/blob/main/install.md)
 
 ## Installation
 
