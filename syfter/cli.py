@@ -108,6 +108,27 @@ def main(ctx, db_path: Optional[Path]):
     is_flag=True,
     help="Don't store in database (just output)",
 )
+@click.option(
+    "-s", "--source",
+    type=click.Choice(["auto", "podman", "docker", "registry", "skopeo"]),
+    default="auto",
+    help="Container image source (default: auto-detect). Use 'podman' to pull via podman, "
+         "'registry' for direct OCI registry pull, 'docker' for docker daemon, "
+         "'skopeo' to pull via skopeo (most reliable for authenticated registries).",
+)
+@click.option(
+    "--pull-first",
+    is_flag=True,
+    help="Pull image with skopeo to local OCI directory before scanning. "
+         "Most reliable method for authenticated registries like registry.redhat.io.",
+)
+@click.option(
+    "--arch",
+    type=click.Choice(["amd64", "arm64", "ppc64le", "s390x"]),
+    default=None,
+    help="Architecture to pull for container images (default: amd64). "
+         "Use when pulling multi-arch images with skopeo.",
+)
 @click.pass_context
 def scan(
     ctx,
@@ -121,6 +142,9 @@ def scan(
     output: Optional[Path],
     original_output: Optional[Path],
     no_store: bool,
+    source: str,
+    pull_first: bool,
+    arch: Optional[str],
 ):
     """
     Scan a target and store the SBOM with product metadata.
@@ -128,13 +152,15 @@ def scan(
     TARGET can be:
     - A directory path (e.g., /path/to/rpms)
     - A container image (e.g., registry.redhat.io/rhel9:latest)
-    - A prefixed path (e.g., dir:/path, docker:image:tag)
+    - A prefixed path (e.g., dir:/path, podman:image:tag)
 
     Examples:
 
         rh-syfter scan /path/to/rpms -p rhel -v 10.0
 
         rh-syfter scan registry.redhat.io/rhel9:latest -p rhel -v 9.0
+
+        rh-syfter scan registry.redhat.io/ubi9:latest -p ubi -v 9.0 --source podman
 
         rh-syfter scan ./packages -p openshift -v 4.14 --description "OCP 4.14"
     """
@@ -172,7 +198,11 @@ def scan(
             path = Path(target.replace("dir:", ""))
             original_sbom, syft_version = scan_directory(path)
         elif source_type == "container":
-            original_sbom, syft_version = scan_container(target)
+            # Pass source if not auto, otherwise let scan_container auto-detect
+            container_source = None if source == "auto" else source
+            original_sbom, syft_version = scan_container(
+                target, source=container_source, pull_first=pull_first, arch=arch
+            )
         else:
             original_sbom, syft_version = scan_target(target)
     except ScanError as e:

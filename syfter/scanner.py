@@ -156,17 +156,128 @@ def scan_directory(
     return scan_target(target, catalogers=catalogers)
 
 
-def scan_container(image: str) -> tuple[dict, str]:
+def scan_container(
+    image: str,
+    source: Optional[str] = None,
+    pull_first: bool = False,
+    arch: Optional[str] = None,
+) -> tuple[dict, str]:
     """
     Scan a container image.
 
     Args:
         image: Container image reference (e.g., "registry.redhat.io/rhel9:latest")
+        source: Optional source scheme override (podman, registry, docker, skopeo)
+                If not specified, will try to auto-detect the best option.
+        pull_first: If True, pull the image to a local OCI directory first using
+                    skopeo, then scan that. More reliable for authenticated registries.
+        arch: Architecture to pull (e.g., "amd64", "arm64"). Defaults to amd64 for skopeo.
 
     Returns:
         tuple: (SBOM dict, syft version string)
     """
-    return scan_target(image)
+    # If image already has a scheme, use as-is
+    if any(image.startswith(f"{s}:") for s in ["podman", "docker", "registry", "oci-dir", "oci-archive", "docker-archive"]):
+        return scan_target(image)
+
+    # If pull_first is set, use skopeo to pull to OCI dir first
+    if pull_first or source == "skopeo":
+        return _scan_via_skopeo(image, arch=arch)
+
+    # If source explicitly specified, use it
+    if source:
+        target = f"{source}:{image}"
+        console.print(f"[dim]Using source: {source}[/dim]")
+        return scan_target(target)
+
+    # Auto-detect: try registry first (most reliable), then skopeo
+    # The 'registry:' source in syft pulls directly from OCI registry
+    # It uses the same auth as podman/docker (~/.docker/config.json or containers auth.json)
+    console.print("[dim]Using direct registry pull...[/dim]")
+    target = f"registry:{image}"
+
+    try:
+        return scan_target(target)
+    except ScanError as e:
+        # If registry pull fails, try skopeo as fallback
+        if shutil.which("skopeo"):
+            console.print("[yellow]Registry pull failed, trying skopeo...[/yellow]")
+            return _scan_via_skopeo(image, arch=arch)
+        raise
+
+
+def _scan_via_skopeo(image: str, arch: Optional[str] = None) -> tuple[dict, str]:
+    """
+    Pull image using skopeo to OCI directory, then scan.
+
+    This is more reliable for authenticated registries as skopeo
+    handles auth better and the result is a local directory.
+
+    Args:
+        image: Container image reference
+        arch: Architecture to pull (e.g., "amd64", "arm64"). Defaults to amd64.
+
+    Returns:
+        tuple: (SBOM dict, syft version string)
+    """
+    import tempfile
+    import atexit
+
+    skopeo_path = shutil.which("skopeo")
+    if not skopeo_path:
+        raise ScanError(
+            "skopeo is not installed. Install it to pull images from authenticated registries. "
+            "On RHEL/Fedora: dnf install skopeo"
+        )
+
+    # Create temp directory for OCI image (don't auto-delete, we'll clean up after scan)
+    tmpdir = tempfile.mkdtemp(prefix="rh-syfter-")
+    oci_path = Path(tmpdir) / "image"
+
+    # Register cleanup for when program exits
+    def cleanup():
+        import shutil as sh
+        if Path(tmpdir).exists():
+            sh.rmtree(tmpdir, ignore_errors=True)
+    atexit.register(cleanup)
+
+    # Default to amd64 if not specified (most common for server images)
+    target_arch = arch or "amd64"
+    console.print(f"[dim]Pulling image with skopeo (linux/{target_arch})...[/dim]")
+
+    # Pull image to OCI directory format
+    # Use --override-os linux to ensure we get Linux containers (not darwin)
+    # Use --override-arch to specify architecture
+    cmd = [
+        "skopeo", "copy",
+        "--override-os", "linux",
+        "--override-arch", target_arch,
+        f"docker://{image}",
+        f"oci:{oci_path}",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        console.print("[green]Image pulled successfully[/green]")
+    except subprocess.CalledProcessError as e:
+        # Cleanup on failure
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise ScanError(f"Failed to pull image with skopeo: {e.stderr}") from e
+
+    # Scan the OCI directory
+    target = f"oci-dir:{oci_path}"
+    try:
+        result = scan_target(target)
+    finally:
+        # Cleanup after scan
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return result
 
 
 def scan_archive(archive_path: Path) -> tuple[dict, str]:
@@ -203,10 +314,9 @@ def get_source_type(target: str) -> str:
         if path.suffix in (".tar", ".gz", ".tgz", ".zip"):
             return "archive"
         return "file"
-    elif target.startswith("docker:") or target.startswith("podman:"):
+    elif target.startswith(("docker:", "podman:", "registry:", "oci-dir:", "oci-archive:", "docker-archive:")):
         return "container"
-    elif ":" in target and "/" in target:
-        # Likely a container image reference
+    elif _looks_like_container_image(target):
         return "container"
     elif Path(target).is_dir():
         return "directory"
@@ -214,3 +324,45 @@ def get_source_type(target: str) -> str:
         return "file"
     else:
         return "unknown"
+
+
+def _looks_like_container_image(target: str) -> bool:
+    """
+    Check if a target string looks like a container image reference.
+
+    Args:
+        target: The target string
+
+    Returns:
+        bool: True if it looks like a container image
+    """
+    # Common registry patterns
+    registry_patterns = [
+        "registry.redhat.io/",
+        "registry.access.redhat.com/",
+        "quay.io/",
+        "docker.io/",
+        "ghcr.io/",
+        "gcr.io/",
+        "mcr.microsoft.com/",
+        "public.ecr.aws/",
+    ]
+
+    # Check for common registry prefixes
+    for pattern in registry_patterns:
+        if target.startswith(pattern):
+            return True
+
+    # Check for image:tag pattern with a registry-like structure
+    # e.g., "myregistry.com/namespace/image:tag"
+    if "/" in target:
+        parts = target.split("/")
+        first_part = parts[0]
+        # If first part has a dot (domain) or colon (port), it's likely a registry
+        if "." in first_part or ":" in first_part:
+            return True
+        # Or if there are at least 2 slashes (registry/namespace/image)
+        if len(parts) >= 3:
+            return True
+
+    return False
