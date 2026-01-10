@@ -108,9 +108,17 @@ def scan_target(
         cmd.extend(["--source-version", version])
 
     # Add catalogers if specified
+    # Use --override-default-catalogers to explicitly use only the catalogers we want
     if catalogers:
-        for cataloger in catalogers:
-            cmd.extend(["--catalogers", cataloger])
+        # Use exact cataloger names (e.g., "rpm-db-cataloger" for RPMs)
+        cataloger_names = []
+        for c in catalogers:
+            if c == "rpm":
+                # RPM cataloger for scanning RPM files
+                cataloger_names.append("rpm-archive-cataloger")
+            else:
+                cataloger_names.append(c)
+        cmd.extend(["--override-default-catalogers", ",".join(cataloger_names)])
 
     # Add extra arguments
     if extra_args:

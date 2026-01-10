@@ -26,18 +26,23 @@ class APIError(Exception):
 class SyfterClient:
     """Client for the RH-Syfter API."""
 
-    def __init__(self, base_url: str, timeout: float = 300.0):
+    def __init__(self, base_url: str, timeout: float = 600.0):
         """
         Initialize the client.
 
         Args:
             base_url: Base URL of the API server (e.g., http://localhost:8000)
-            timeout: Request timeout in seconds (default: 300 for large uploads)
+            timeout: Request timeout in seconds (default: 600 for large uploads)
         """
         self.base_url = base_url.rstrip("/")
         self.api_url = f"{self.base_url}/api/v1"
         self.timeout = timeout
-        self.client = httpx.Client(timeout=timeout)
+        # Use longer timeouts for uploads - large SBOMs can take minutes
+        # Force HTTP/1.1 for large uploads - HTTP/2 can have issues with very large requests
+        self.client = httpx.Client(
+            timeout=httpx.Timeout(timeout, connect=30.0, read=timeout, write=timeout),
+            http2=False,  # Disable HTTP/2 for more reliable large uploads
+        )
 
     def _url(self, path: str) -> str:
         """Build full URL for an API path."""
@@ -136,35 +141,68 @@ class SyfterClient:
         Returns:
             dict: Scan response
         """
-        # Compress data
-        original_data = gzip.compress(json.dumps(original_sbom).encode("utf-8"))
-        modified_data = gzip.compress(json.dumps(modified_sbom).encode("utf-8"))
-        packages_data = gzip.compress(json.dumps(packages).encode("utf-8"))
+        import tempfile
+        import subprocess
+        import os
+        
+        # Compress data to temp files for streaming upload
+        console.print("[dim]Compressing data to temp files...[/dim]")
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_path = Path(tmpdir) / "original.json.gz"
+            modified_path = Path(tmpdir) / "modified.json.gz"
+            packages_path = Path(tmpdir) / "packages.json.gz"
+            
+            # Write compressed data to files
+            with gzip.open(original_path, 'wt', encoding='utf-8') as f:
+                json.dump(original_sbom, f)
+            with gzip.open(modified_path, 'wt', encoding='utf-8') as f:
+                json.dump(modified_sbom, f)
+            with gzip.open(packages_path, 'wt', encoding='utf-8') as f:
+                json.dump(packages, f)
+            
+            original_size = original_path.stat().st_size
+            modified_size = modified_path.stat().st_size
+            packages_size = packages_path.stat().st_size
+            total_size = original_size + modified_size + packages_size
 
-        console.print(
-            f"[dim]Uploading scan: "
-            f"original={len(original_data)/1024/1024:.1f}MB, "
-            f"modified={len(modified_data)/1024/1024:.1f}MB, "
-            f"index={len(packages_data)/1024:.1f}KB[/dim]"
-        )
-
-        # Upload as multipart form
-        response = self.client.post(
-            self._url("/scans/upload"),
-            data={
-                "product_name": product_name,
-                "product_version": product_version,
-                "source_path": source_path,
-                "source_type": source_type,
-                "syft_version": syft_version or "",
-            },
-            files={
-                "original_sbom": ("original.json.gz", original_data, "application/gzip"),
-                "modified_sbom": ("modified.json.gz", modified_data, "application/gzip"),
-                "packages_json": ("packages.json.gz", packages_data, "application/gzip"),
-            },
-        )
-        return self._handle_response(response)
+            console.print(
+                f"[dim]Uploading scan: "
+                f"original={original_size/1024/1024:.1f}MB, "
+                f"modified={modified_size/1024/1024:.1f}MB, "
+                f"index={packages_size/1024:.1f}KB "
+                f"(total: {total_size/1024/1024:.1f}MB)[/dim]"
+            )
+            console.print("[dim]Sending to server via curl (this may take a while for large uploads)...[/dim]")
+            
+            # Use curl for large uploads - more reliable for very large multipart uploads
+            curl_cmd = [
+                "curl", "-s", "-S", "-X", "POST",
+                self._url("/scans/upload"),
+                "-F", f"product_name={product_name}",
+                "-F", f"product_version={product_version}",
+                "-F", f"source_path={source_path}",
+                "-F", f"source_type={source_type}",
+                "-F", f"syft_version={syft_version or ''}",
+                "-F", f"original_sbom=@{original_path};type=application/gzip",
+                "-F", f"modified_sbom=@{modified_path};type=application/gzip",
+                "-F", f"packages_json=@{packages_path};type=application/gzip",
+                "--connect-timeout", "30",
+                "--max-time", "3600",  # 1 hour max
+            ]
+            
+            result = subprocess.run(curl_cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                raise APIError(500, f"Upload failed: {result.stderr}")
+            
+            try:
+                response_data = json.loads(result.stdout)
+                if "detail" in response_data:
+                    raise APIError(400, response_data["detail"])
+                return response_data
+            except json.JSONDecodeError:
+                raise APIError(500, f"Invalid response: {result.stdout}")
 
     def delete_scan(self, scan_id: int) -> None:
         """Delete a scan."""

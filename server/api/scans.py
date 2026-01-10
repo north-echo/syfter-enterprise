@@ -4,6 +4,8 @@ Scan API endpoints.
 
 import gzip
 import json
+import logging
+import time
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
@@ -17,6 +19,7 @@ from .schemas import (
     PackageCreate,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -111,6 +114,9 @@ async def upload_scan(
     All files should be gzip compressed JSON.
     If a scan already exists for this product, it will be replaced.
     """
+    start_time = time.time()
+    logger.info(f"Starting upload for {product_name}-{product_version}")
+    
     storage = get_storage()
 
     # Get or create product
@@ -128,6 +134,7 @@ async def upload_scan(
         db.add(product)
         db.commit()
         db.refresh(product)
+    logger.info(f"Product resolved: id={product.id}")
 
     # Delete existing scan for this product (replace behavior)
     existing_scan = (
@@ -136,6 +143,7 @@ async def upload_scan(
         .first()
     )
     if existing_scan:
+        logger.info(f"Deleting existing scan {existing_scan.id}")
         # Delete old SBOM files from storage
         try:
             storage.delete(existing_scan.original_sbom_key)
@@ -147,18 +155,25 @@ async def upload_scan(
         db.query(Package).filter(Package.scan_id == existing_scan.id).delete()
         db.delete(existing_scan)
         db.commit()
+        logger.info("Existing scan deleted")
 
     # Read uploaded files
+    logger.info("Reading uploaded files...")
     original_data = await original_sbom.read()
     modified_data = await modified_sbom.read()
     packages_data = await packages_json.read()
+    logger.info(f"Files read: original={len(original_data)/1024/1024:.1f}MB, modified={len(modified_data)/1024/1024:.1f}MB, packages={len(packages_data)/1024:.1f}KB")
 
     # Parse packages for indexing
+    logger.info("Parsing packages JSON...")
     try:
         packages_json_str = gzip.decompress(packages_data).decode("utf-8")
         packages_list = json.loads(packages_json_str)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid packages JSON: {e}")
+    
+    total_files = sum(len(p.get("files", [])) for p in packages_list)
+    logger.info(f"Parsed {len(packages_list)} packages with {total_files} files")
 
     # Create scan record first to get ID
     scan = Scan(
@@ -169,27 +184,35 @@ async def upload_scan(
         original_sbom_key="",  # Will update after
         modified_sbom_key="",
         package_count=len(packages_list),
-        file_count=sum(len(p.get("files", [])) for p in packages_list),
+        file_count=total_files,
         original_size_bytes=len(original_data),
         modified_size_bytes=len(modified_data),
     )
     db.add(scan)
     db.commit()
     db.refresh(scan)
+    logger.info(f"Scan record created: id={scan.id}")
 
     # Generate storage keys and store SBOMs
+    logger.info("Storing SBOMs to object storage...")
     original_key = _generate_storage_key(product_name, product_version, scan.id, "original.json.gz")
     modified_key = _generate_storage_key(product_name, product_version, scan.id, "modified.json.gz")
 
     storage.put(original_key, original_data)
     storage.put(modified_key, modified_data)
+    logger.info("SBOMs stored successfully")
 
     # Update scan with storage keys
     scan.original_sbom_key = original_key
     scan.modified_sbom_key = modified_key
 
-    # Index packages and files
-    for pkg_data in packages_list:
+    # Index packages and files in batches for better performance
+    logger.info("Indexing packages and files...")
+    batch_size = 100
+    packages_indexed = 0
+    files_indexed = 0
+    
+    for i, pkg_data in enumerate(packages_list):
         package = Package(
             scan_id=scan.id,
             product_id=product.id,
@@ -205,6 +228,7 @@ async def upload_scan(
         )
         db.add(package)
         db.flush()  # Get package ID
+        packages_indexed += 1
 
         # Index files
         for file_data in pkg_data.get("files", []):
@@ -217,8 +241,18 @@ async def upload_scan(
                 digest_algorithm=file_data.get("digest_algorithm", "sha256"),
             )
             db.add(file_obj)
+            files_indexed += 1
+        
+        # Periodic commit and progress logging
+        if (i + 1) % batch_size == 0:
+            db.commit()
+            logger.info(f"Progress: {packages_indexed}/{len(packages_list)} packages, {files_indexed}/{total_files} files")
 
+    # Final commit
     db.commit()
+    
+    elapsed = time.time() - start_time
+    logger.info(f"Upload complete: {packages_indexed} packages, {files_indexed} files in {elapsed:.1f}s")
 
     return ScanResponse(
         id=scan.id,

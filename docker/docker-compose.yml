@@ -80,6 +80,14 @@ services:
       timeout: 10s
       retries: 3
     restart: unless-stopped
+    # Large SBOM uploads need more memory and longer timeouts
+    # For RHEL-sized scans (~1GB compressed), need 8GB+ to handle decompression and parsing
+    deploy:
+      resources:
+        limits:
+          memory: 12G
+        reservations:
+          memory: 2G
 
 volumes:
   postgres_data:
