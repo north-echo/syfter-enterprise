@@ -206,53 +206,74 @@ async def upload_scan(
     scan.original_sbom_key = original_key
     scan.modified_sbom_key = modified_key
 
-    # Index packages and files in batches for better performance
-    logger.info("Indexing packages and files...")
-    batch_size = 100
-    packages_indexed = 0
-    files_indexed = 0
+    # Index packages and files using bulk inserts for better performance
+    logger.info("Indexing packages and files with bulk inserts...")
     
-    for i, pkg_data in enumerate(packages_list):
-        package = Package(
-            scan_id=scan.id,
-            product_id=product.id,
-            name=pkg_data.get("name", ""),
-            version=pkg_data.get("version"),
-            release=pkg_data.get("release"),
-            arch=pkg_data.get("arch"),
-            epoch=pkg_data.get("epoch"),
-            source_rpm=pkg_data.get("source_rpm"),
-            license=pkg_data.get("license"),
-            purl=pkg_data.get("purl"),
-            cpes=pkg_data.get("cpes"),
-        )
-        db.add(package)
-        db.flush()  # Get package ID
-        packages_indexed += 1
-
-        # Index files
-        for file_data in pkg_data.get("files", []):
-            file_obj = FileModel(
-                package_id=package.id,
-                scan_id=scan.id,
-                product_id=product.id,
-                path=file_data.get("path", ""),
-                digest=file_data.get("digest"),
-                digest_algorithm=file_data.get("digest_algorithm", "sha256"),
-            )
-            db.add(file_obj)
-            files_indexed += 1
-        
-        # Periodic commit and progress logging
-        if (i + 1) % batch_size == 0:
-            db.commit()
-            logger.info(f"Progress: {packages_indexed}/{len(packages_list)} packages, {files_indexed}/{total_files} files")
-
-    # Final commit
+    # Prepare all package data for bulk insert
+    package_mappings = []
+    for pkg_data in packages_list:
+        package_mappings.append({
+            "scan_id": scan.id,
+            "product_id": product.id,
+            "name": pkg_data.get("name", ""),
+            "version": pkg_data.get("version"),
+            "release": pkg_data.get("release"),
+            "arch": pkg_data.get("arch"),
+            "epoch": pkg_data.get("epoch"),
+            "source_rpm": pkg_data.get("source_rpm"),
+            "license": pkg_data.get("license"),
+            "purl": pkg_data.get("purl"),
+            "cpes": pkg_data.get("cpes"),
+        })
+    
+    # Bulk insert packages
+    logger.info(f"Bulk inserting {len(package_mappings)} packages...")
+    bulk_start = time.time()
+    db.bulk_insert_mappings(Package, package_mappings)
     db.commit()
+    logger.info(f"Packages inserted in {time.time() - bulk_start:.1f}s")
+    
+    # Get package IDs by querying back (we need them for file foreign keys)
+    # This is faster than individual flushes
+    logger.info("Retrieving package IDs...")
+    packages_by_name = {}
+    for pkg in db.query(Package).filter(Package.scan_id == scan.id).all():
+        # Key by name+version+arch to handle duplicates
+        key = (pkg.name, pkg.version, pkg.arch)
+        packages_by_name[key] = pkg.id
+    
+    # Prepare file data for bulk insert
+    logger.info("Preparing file records...")
+    file_mappings = []
+    for pkg_data in packages_list:
+        key = (pkg_data.get("name", ""), pkg_data.get("version"), pkg_data.get("arch"))
+        package_id = packages_by_name.get(key)
+        if package_id:
+            for file_data in pkg_data.get("files", []):
+                file_mappings.append({
+                    "package_id": package_id,
+                    "scan_id": scan.id,
+                    "product_id": product.id,
+                    "path": file_data.get("path", ""),
+                    "digest": file_data.get("digest"),
+                    "digest_algorithm": file_data.get("digest_algorithm", "sha256"),
+                })
+    
+    # Bulk insert files in batches (can be millions of rows)
+    logger.info(f"Bulk inserting {len(file_mappings)} files...")
+    bulk_start = time.time()
+    batch_size = 10000
+    for i in range(0, len(file_mappings), batch_size):
+        batch = file_mappings[i:i + batch_size]
+        db.bulk_insert_mappings(FileModel, batch)
+        if (i + batch_size) % 100000 == 0:
+            db.commit()
+            logger.info(f"Files progress: {min(i + batch_size, len(file_mappings))}/{len(file_mappings)}")
+    db.commit()
+    logger.info(f"Files inserted in {time.time() - bulk_start:.1f}s")
     
     elapsed = time.time() - start_time
-    logger.info(f"Upload complete: {packages_indexed} packages, {files_indexed} files in {elapsed:.1f}s")
+    logger.info(f"Upload complete: {len(package_mappings)} packages, {len(file_mappings)} files in {elapsed:.1f}s")
 
     return ScanResponse(
         id=scan.id,
