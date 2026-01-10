@@ -200,6 +200,7 @@ def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, mo
 def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages):
     """Store scan using API server."""
     from .client import SyfterClient, APIError
+    import httpx
 
     server_url = ctx.obj["server_url"]
     try:
@@ -215,6 +216,10 @@ def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, m
                 packages=packages,
             )
             console.print(f"[green]✓ Scan #{result['id']} uploaded to server[/green]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))
+        sys.exit(1)
     except APIError as e:
         console.print(f"[red]Upload failed: {e}[/red]")
         sys.exit(1)
@@ -286,6 +291,7 @@ def _query_local(name, file_path, digest, product, product_version, limit, outpu
 def _query_server(ctx, name, file_path, digest, product, product_version, limit, output_json):
     """Query using API server."""
     from .client import SyfterClient, APIError
+    import httpx
 
     server_url = ctx.obj["server_url"]
     try:
@@ -328,6 +334,10 @@ def _query_server(ctx, name, file_path, digest, product, product_version, limit,
                 console.print(table)
             else:
                 console.print("[yellow]Please specify --name, --file, or --digest[/yellow]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))
+        sys.exit(1)
     except APIError as e:
         console.print(f"[red]Query failed: {e}[/red]")
         sys.exit(1)
@@ -365,6 +375,7 @@ def _export_local(product, product_version, output_format, output):
 def _export_server(ctx, product, product_version, output_format, output):
     """Export using API server."""
     from .client import SyfterClient, APIError
+    import httpx
 
     server_url = ctx.obj["server_url"]
     try:
@@ -372,6 +383,10 @@ def _export_server(ctx, product, product_version, output_format, output):
             data = client.get_sbom(product, product_version)
             sbom = json.loads(gzip.decompress(data).decode("utf-8"))
             _do_export(sbom, product, product_version, output_format, output)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))
+        sys.exit(1)
     except APIError as e:
         console.print(f"[red]Export failed: {e}[/red]")
         sys.exit(1)
@@ -422,9 +437,15 @@ def list_products(ctx):
         storage = Storage()
         products = storage.list_products()
     else:
+        import httpx
         from .client import SyfterClient
-        with SyfterClient(ctx.obj["server_url"]) as client:
-            products = client.list_products()
+        try:
+            with SyfterClient(ctx.obj["server_url"]) as client:
+                products = client.list_products()
+        except httpx.ConnectError:
+            console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+            console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(ctx.obj['server_url']))
+            sys.exit(1)
 
     if not products:
         console.print("[yellow]No products found[/yellow]")
@@ -457,11 +478,17 @@ def stats(ctx):
         storage_type = "local"
         db_type = "sqlite"
     else:
+        import httpx
         from .client import SyfterClient
-        with SyfterClient(ctx.obj["server_url"]) as client:
-            s = client.get_stats()
-            storage_type = s.get("storage_type", "unknown")
-            db_type = s.get("database_type", "unknown")
+        try:
+            with SyfterClient(ctx.obj["server_url"]) as client:
+                s = client.get_stats()
+                storage_type = s.get("storage_type", "unknown")
+                db_type = s.get("database_type", "unknown")
+        except httpx.ConnectError:
+            console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+            console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(ctx.obj['server_url']))
+            sys.exit(1)
 
     console.print(Panel(
         f"[bold]Mode:[/bold] {'Server' if not ctx.obj['local_mode'] else 'Local'}\n"
