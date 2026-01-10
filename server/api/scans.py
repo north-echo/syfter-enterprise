@@ -109,6 +109,7 @@ async def upload_scan(
     Upload a complete scan with SBOMs and package index.
 
     All files should be gzip compressed JSON.
+    If a scan already exists for this product, it will be replaced.
     """
     storage = get_storage()
 
@@ -127,6 +128,22 @@ async def upload_scan(
         db.add(product)
         db.commit()
         db.refresh(product)
+
+    # Delete existing scan for this product (replace behavior)
+    existing_scan = (
+        db.query(Scan)
+        .filter(Scan.product_id == product.id)
+        .first()
+    )
+    if existing_scan:
+        # Delete old SBOM files from storage
+        try:
+            storage.delete(existing_scan.original_sbom_key)
+            storage.delete(existing_scan.modified_sbom_key)
+        except Exception:
+            pass  # Ignore storage errors
+        db.delete(existing_scan)
+        db.commit()
 
     # Read uploaded files
     original_data = await original_sbom.read()

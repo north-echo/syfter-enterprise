@@ -207,6 +207,8 @@ class Storage:
         """
         Store a scan result with indexed package data.
 
+        If a scan already exists for this product, it will be replaced.
+
         Args:
             product_id: Product ID
             source_path: Path to scanned source
@@ -221,6 +223,20 @@ class Storage:
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
+
+            # Delete existing scan for this product (replace behavior)
+            cursor.execute(
+                "SELECT id FROM scans WHERE product_id = ?",
+                (product_id,)
+            )
+            existing = cursor.fetchone()
+            if existing:
+                existing_scan_id = existing[0]
+                # Delete files, packages, and scan (cascading would be nice but SQLite...)
+                cursor.execute("DELETE FROM files WHERE scan_id = ?", (existing_scan_id,))
+                cursor.execute("DELETE FROM packages WHERE scan_id = ?", (existing_scan_id,))
+                cursor.execute("DELETE FROM scans WHERE id = ?", (existing_scan_id,))
+                console.print(f"[dim]Replacing existing scan #{existing_scan_id}[/dim]")
 
             # Count files
             file_count = sum(len(pkg.get("files", [])) for pkg in packages)
