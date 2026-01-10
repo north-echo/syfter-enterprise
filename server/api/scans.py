@@ -142,6 +142,9 @@ async def upload_scan(
             storage.delete(existing_scan.modified_sbom_key)
         except Exception:
             pass  # Ignore storage errors
+        # Explicitly delete related records
+        db.query(FileModel).filter(FileModel.scan_id == existing_scan.id).delete()
+        db.query(Package).filter(Package.scan_id == existing_scan.id).delete()
         db.delete(existing_scan)
         db.commit()
 
@@ -248,5 +251,8 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db)):
     except Exception:
         pass  # Ignore storage errors during deletion
 
+    # Explicitly delete related records (in case cascade doesn't work)
+    db.query(FileModel).filter(FileModel.scan_id == scan_id).delete()
+    db.query(Package).filter(Package.scan_id == scan_id).delete()
     db.delete(scan)
     db.commit()
