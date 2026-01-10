@@ -2,6 +2,7 @@
 Storage module - SQLite database for SBOM storage and querying.
 """
 
+import gzip
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -14,6 +15,18 @@ from rich.console import Console
 from .models import Product, ScanRecord, PackageInfo, FileInfo
 
 console = Console()
+
+
+def _compress_json(data: dict) -> bytes:
+    """Compress a dictionary to gzipped JSON bytes."""
+    json_str = json.dumps(data)
+    return gzip.compress(json_str.encode("utf-8"))
+
+
+def _decompress_json(data: bytes) -> dict:
+    """Decompress gzipped JSON bytes to a dictionary."""
+    json_str = gzip.decompress(data).decode("utf-8")
+    return json.loads(json_str)
 
 DEFAULT_DB_PATH = Path("~/.rh-syfter/syfter.db").expanduser()
 
@@ -65,7 +78,7 @@ class Storage:
                 )
             """)
 
-            # Scans table - stores the full SBOM JSON
+            # Scans table - stores the full SBOM as compressed JSON (gzip)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS scans (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,8 +87,8 @@ class Storage:
                     source_type TEXT DEFAULT 'directory',
                     scan_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     syft_version TEXT,
-                    original_sbom TEXT NOT NULL,
-                    modified_sbom TEXT NOT NULL,
+                    original_sbom BLOB NOT NULL,
+                    modified_sbom BLOB NOT NULL,
                     package_count INTEGER DEFAULT 0,
                     file_count INTEGER DEFAULT 0,
                     FOREIGN KEY (product_id) REFERENCES products(id)
@@ -212,6 +225,16 @@ class Storage:
             # Count files
             file_count = sum(len(pkg.get("files", [])) for pkg in packages)
 
+            # Compress SBOMs for storage
+            original_sbom_compressed = _compress_json(original_sbom)
+            modified_sbom_compressed = _compress_json(modified_sbom)
+
+            console.print(
+                f"[dim]Compressed SBOMs: "
+                f"original {len(original_sbom_compressed) / 1024 / 1024:.1f}MB, "
+                f"modified {len(modified_sbom_compressed) / 1024 / 1024:.1f}MB[/dim]"
+            )
+
             # Insert scan record
             cursor.execute(
                 """
@@ -224,8 +247,8 @@ class Storage:
                     source_path,
                     source_type,
                     syft_version,
-                    json.dumps(original_sbom),
-                    json.dumps(modified_sbom),
+                    original_sbom_compressed,
+                    modified_sbom_compressed,
                     len(packages),
                     file_count,
                 ),
@@ -305,7 +328,7 @@ class Storage:
             )
             row = cursor.fetchone()
             if row:
-                return json.loads(row["modified_sbom"])
+                return _decompress_json(row["modified_sbom"])
             return None
 
     def get_all_product_sboms(self, product_name: str, product_version: str) -> list[dict]:
@@ -333,7 +356,7 @@ class Storage:
             )
             return [
                 {
-                    "sbom": json.loads(row["modified_sbom"]),
+                    "sbom": _decompress_json(row["modified_sbom"]),
                     "source_path": row["source_path"],
                     "scan_timestamp": row["scan_timestamp"],
                 }

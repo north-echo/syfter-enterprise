@@ -311,13 +311,24 @@ def _extract_files(artifact: dict) -> list[dict]:
         return files
 
     # RPM packages may have files in metadata
-    rpm_files = metadata.get("files", [])
+    rpm_files = metadata.get("files") or []  # Handle None case
+    if not isinstance(rpm_files, list):
+        return files
+
     for f in rpm_files:
         if isinstance(f, dict):
+            digest_info = f.get("digest")
+            if isinstance(digest_info, dict):
+                digest_value = digest_info.get("value", "")
+                digest_algo = digest_info.get("algorithm", "sha256")
+            else:
+                digest_value = ""
+                digest_algo = ""
+
             files.append({
                 "path": f.get("path", ""),
-                "digest": f.get("digest", {}).get("value", "") if isinstance(f.get("digest"), dict) else "",
-                "digest_algorithm": f.get("digest", {}).get("algorithm", "sha256") if isinstance(f.get("digest"), dict) else "sha256",
+                "digest": digest_value,
+                "digest_algorithm": digest_algo,
             })
         elif isinstance(f, str):
             files.append({"path": f, "digest": "", "digest_algorithm": ""})

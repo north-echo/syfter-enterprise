@@ -129,6 +129,11 @@ def main(ctx, db_path: Optional[Path]):
     help="Architecture to pull for container images (default: amd64). "
          "Use when pulling multi-arch images with skopeo.",
 )
+@click.option(
+    "-q", "--quiet",
+    is_flag=True,
+    help="Suppress syft progress output.",
+)
 @click.pass_context
 def scan(
     ctx,
@@ -145,6 +150,7 @@ def scan(
     source: str,
     pull_first: bool,
     arch: Optional[str],
+    quiet: bool,
 ):
     """
     Scan a target and store the SBOM with product metadata.
@@ -196,15 +202,31 @@ def scan(
     try:
         if source_type == "directory":
             path = Path(target.replace("dir:", ""))
-            original_sbom, syft_version = scan_directory(path)
+            original_sbom, syft_version = scan_directory(
+                path,
+                show_progress=not quiet,
+                name=prod.full_name,
+                version=product_version,
+            )
         elif source_type == "container":
             # Pass source if not auto, otherwise let scan_container auto-detect
             container_source = None if source == "auto" else source
             original_sbom, syft_version = scan_container(
-                target, source=container_source, pull_first=pull_first, arch=arch
+                target,
+                source=container_source,
+                pull_first=pull_first,
+                arch=arch,
+                show_progress=not quiet,
+                name=prod.full_name,
+                version=product_version,
             )
         else:
-            original_sbom, syft_version = scan_target(target)
+            original_sbom, syft_version = scan_target(
+                target,
+                show_progress=not quiet,
+                name=prod.full_name,
+                version=product_version,
+            )
     except ScanError as e:
         console.print(f"[red]Scan failed: {e}[/red]")
         sys.exit(1)

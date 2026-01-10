@@ -70,6 +70,9 @@ def scan_target(
     output_format: str = "syft-json",
     catalogers: Optional[list[str]] = None,
     extra_args: Optional[list[str]] = None,
+    show_progress: bool = True,
+    name: Optional[str] = None,
+    version: Optional[str] = None,
 ) -> dict:
     """
     Run syft against a target and return the SBOM as a dictionary.
@@ -79,6 +82,9 @@ def scan_target(
         output_format: Output format (default: syft-json)
         catalogers: Optional list of catalogers to use (e.g., ["rpm"])
         extra_args: Optional additional arguments to pass to syft
+        show_progress: Whether to show syft's progress output (default: True)
+        name: Optional name for the source (avoids syft warning)
+        version: Optional version for the source (avoids syft warning)
 
     Returns:
         dict: Parsed SBOM JSON
@@ -87,11 +93,19 @@ def scan_target(
         SyftNotFoundError: If syft is not installed
         ScanError: If the scan fails
     """
+    import sys
+
     syft_version = check_syft_installed()
     console.print(f"[dim]Using syft version: {syft_version}[/dim]")
 
     # Build command
     cmd = ["syft", target, "-o", output_format]
+
+    # Add name and version to avoid syft warnings about deriving from path
+    if name:
+        cmd.extend(["--source-name", name])
+    if version:
+        cmd.extend(["--source-version", version])
 
     # Add catalogers if specified
     if catalogers:
@@ -104,18 +118,35 @@ def scan_target(
 
     console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
 
-    try:
-        result = subprocess.run(
+    if show_progress:
+        # Use Popen to stream stderr (progress) while capturing stdout (SBOM)
+        process = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=sys.stderr,  # Let progress output go directly to terminal
             text=True,
-            check=True,
         )
-    except subprocess.CalledProcessError as e:
-        raise ScanError(f"Syft scan failed: {e.stderr}") from e
+        stdout, _ = process.communicate()
+
+        if process.returncode != 0:
+            raise ScanError(f"Syft scan failed with exit code {process.returncode}")
+
+        result_stdout = stdout
+    else:
+        # Capture everything
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            result_stdout = result.stdout
+        except subprocess.CalledProcessError as e:
+            raise ScanError(f"Syft scan failed: {e.stderr}") from e
 
     try:
-        sbom = json.loads(result.stdout)
+        sbom = json.loads(result_stdout)
     except json.JSONDecodeError as e:
         raise ScanError(f"Failed to parse syft output as JSON: {e}") from e
 
@@ -125,6 +156,9 @@ def scan_target(
 def scan_directory(
     directory: Path,
     catalogers: Optional[list[str]] = None,
+    show_progress: bool = True,
+    name: Optional[str] = None,
+    version: Optional[str] = None,
 ) -> tuple[dict, str]:
     """
     Scan a directory of packages (typically RPMs).
@@ -132,6 +166,9 @@ def scan_directory(
     Args:
         directory: Path to the directory to scan
         catalogers: Optional list of catalogers (defaults to ["rpm"] for RPM dirs)
+        show_progress: Whether to show syft's progress output
+        name: Optional name for the source
+        version: Optional version for the source
 
     Returns:
         tuple: (SBOM dict, syft version string)
@@ -153,7 +190,13 @@ def scan_directory(
     # Use dir: scheme for directory scanning
     target = f"dir:{directory}"
 
-    return scan_target(target, catalogers=catalogers)
+    return scan_target(
+        target,
+        catalogers=catalogers,
+        show_progress=show_progress,
+        name=name,
+        version=version,
+    )
 
 
 def scan_container(
@@ -161,6 +204,9 @@ def scan_container(
     source: Optional[str] = None,
     pull_first: bool = False,
     arch: Optional[str] = None,
+    show_progress: bool = True,
+    name: Optional[str] = None,
+    version: Optional[str] = None,
 ) -> tuple[dict, str]:
     """
     Scan a container image.
@@ -172,23 +218,26 @@ def scan_container(
         pull_first: If True, pull the image to a local OCI directory first using
                     skopeo, then scan that. More reliable for authenticated registries.
         arch: Architecture to pull (e.g., "amd64", "arm64"). Defaults to amd64 for skopeo.
+        show_progress: Whether to show syft's progress output
+        name: Optional name for the source
+        version: Optional version for the source
 
     Returns:
         tuple: (SBOM dict, syft version string)
     """
     # If image already has a scheme, use as-is
     if any(image.startswith(f"{s}:") for s in ["podman", "docker", "registry", "oci-dir", "oci-archive", "docker-archive"]):
-        return scan_target(image)
+        return scan_target(image, show_progress=show_progress, name=name, version=version)
 
     # If pull_first is set, use skopeo to pull to OCI dir first
     if pull_first or source == "skopeo":
-        return _scan_via_skopeo(image, arch=arch)
+        return _scan_via_skopeo(image, arch=arch, show_progress=show_progress, name=name, version=version)
 
     # If source explicitly specified, use it
     if source:
         target = f"{source}:{image}"
         console.print(f"[dim]Using source: {source}[/dim]")
-        return scan_target(target)
+        return scan_target(target, show_progress=show_progress, name=name, version=version)
 
     # Auto-detect: try registry first (most reliable), then skopeo
     # The 'registry:' source in syft pulls directly from OCI registry
@@ -197,16 +246,22 @@ def scan_container(
     target = f"registry:{image}"
 
     try:
-        return scan_target(target)
+        return scan_target(target, show_progress=show_progress, name=name, version=version)
     except ScanError as e:
         # If registry pull fails, try skopeo as fallback
         if shutil.which("skopeo"):
             console.print("[yellow]Registry pull failed, trying skopeo...[/yellow]")
-            return _scan_via_skopeo(image, arch=arch)
+            return _scan_via_skopeo(image, arch=arch, show_progress=show_progress, name=name, version=version)
         raise
 
 
-def _scan_via_skopeo(image: str, arch: Optional[str] = None) -> tuple[dict, str]:
+def _scan_via_skopeo(
+    image: str,
+    arch: Optional[str] = None,
+    show_progress: bool = True,
+    name: Optional[str] = None,
+    version: Optional[str] = None,
+) -> tuple[dict, str]:
     """
     Pull image using skopeo to OCI directory, then scan.
 
@@ -216,6 +271,9 @@ def _scan_via_skopeo(image: str, arch: Optional[str] = None) -> tuple[dict, str]
     Args:
         image: Container image reference
         arch: Architecture to pull (e.g., "amd64", "arm64"). Defaults to amd64.
+        show_progress: Whether to show syft's progress output
+        name: Optional name for the source
+        version: Optional version for the source
 
     Returns:
         tuple: (SBOM dict, syft version string)
@@ -272,7 +330,7 @@ def _scan_via_skopeo(image: str, arch: Optional[str] = None) -> tuple[dict, str]
     # Scan the OCI directory
     target = f"oci-dir:{oci_path}"
     try:
-        result = scan_target(target)
+        result = scan_target(target, show_progress=show_progress, name=name, version=version)
     finally:
         # Cleanup after scan
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -307,6 +365,7 @@ def get_source_type(target: str) -> str:
     Returns:
         str: Source type (directory, container, archive, etc.)
     """
+    # Check explicit prefixes first
     if target.startswith("dir:"):
         return "directory"
     elif target.startswith("file:"):
@@ -316,14 +375,22 @@ def get_source_type(target: str) -> str:
         return "file"
     elif target.startswith(("docker:", "podman:", "registry:", "oci-dir:", "oci-archive:", "docker-archive:")):
         return "container"
-    elif _looks_like_container_image(target):
-        return "container"
-    elif Path(target).is_dir():
+
+    # Check filesystem BEFORE container image detection
+    # This ensures local paths are not mistaken for container images
+    path = Path(target)
+    if path.is_dir():
         return "directory"
-    elif Path(target).is_file():
+    elif path.is_file():
+        if path.suffix in (".tar", ".gz", ".tgz", ".zip"):
+            return "archive"
         return "file"
-    else:
-        return "unknown"
+
+    # Only check for container image if it's not a filesystem path
+    if _looks_like_container_image(target):
+        return "container"
+
+    return "unknown"
 
 
 def _looks_like_container_image(target: str) -> bool:
