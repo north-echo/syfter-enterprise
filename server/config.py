@@ -110,6 +110,8 @@ class ServerConfig:
     port: int = 8000
     debug: bool = False
     workers: int = 4
+    # Skip file indexing for scans with more than this many files (0 = never skip)
+    skip_file_index_threshold: int = 100000
 
     database: DatabaseConfig = field(default_factory=DatabaseConfig.from_env)
     storage: StorageConfig = field(default_factory=StorageConfig.from_env)
@@ -122,6 +124,7 @@ class ServerConfig:
             port=int(os.getenv("SYFTER_PORT", "8000")),
             debug=os.getenv("SYFTER_DEBUG", "false").lower() == "true",
             workers=int(os.getenv("SYFTER_WORKERS", "4")),
+            skip_file_index_threshold=int(os.getenv("SYFTER_SKIP_FILE_INDEX_THRESHOLD", "100000")),
             database=DatabaseConfig.from_env(),
             storage=StorageConfig.from_env(),
         )

@@ -2,8 +2,11 @@ version: '3.8'
 
 services:
   # PostgreSQL database
+  # Note: On ARM Macs, use 'podman-compose --podman-build-args="--platform linux/arm64" up -d'
+  # or set DOCKER_DEFAULT_PLATFORM=linux/arm64
   postgres:
     image: postgres:16-alpine
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
     container_name: syfter-postgres
     environment:
       POSTGRES_USER: syfter
@@ -23,6 +26,7 @@ services:
   # MinIO object storage (S3-compatible)
   minio:
     image: minio/minio:latest
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
     container_name: syfter-minio
     command: server /data --console-address ":9001"
     environment:
@@ -45,6 +49,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      platforms:
+        - ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
     container_name: syfter-api
     environment:
       # Database configuration
@@ -66,7 +73,9 @@ services:
       # Server configuration
       SYFTER_HOST: 0.0.0.0
       SYFTER_PORT: 8000
-      SYFTER_WORKERS: 4
+      SYFTER_WORKERS: 2
+      # Skip file indexing for large scans (>100K files) to avoid OOM
+      SYFTER_SKIP_FILE_INDEX_THRESHOLD: ${SYFTER_SKIP_FILE_INDEX_THRESHOLD:-100000}
     ports:
       - "8000:8000"
     depends_on:

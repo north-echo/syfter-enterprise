@@ -244,12 +244,13 @@ def _modify_artifact_purl(artifact: dict, product: Product) -> None:
             pass
 
 
-def extract_packages(sbom: dict) -> list[dict]:
+def extract_packages(sbom: dict, skip_files: bool = False) -> list[dict]:
     """
     Extract package information from an SBOM for indexing.
 
     Args:
         sbom: The syft-json SBOM
+        skip_files: If True, don't extract file information (saves memory for large scans)
 
     Returns:
         list: List of package dictionaries with extracted info
@@ -277,7 +278,7 @@ def extract_packages(sbom: dict) -> list[dict]:
             "license": _extract_license(artifact),
             "purl": artifact.get("purl", ""),
             "cpes": json.dumps(cpe_strings),
-            "files": _extract_files(artifact),
+            "files": [] if skip_files else _extract_files(artifact),
         }
         packages.append(pkg)
 

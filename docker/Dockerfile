@@ -30,6 +30,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run the server with multiple workers for concurrent requests
-# --workers 4 allows handling concurrent requests while one is doing a long upload
-CMD ["python", "-m", "uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "300", "--workers", "4"]
+# Run the server with 2 workers for concurrent requests
+# Fewer workers = more memory per worker for large SBOM processing
+CMD ["python", "-m", "uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "300", "--workers", "2"]

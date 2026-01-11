@@ -11,6 +11,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
+from ..config import get_config
 from ..db import get_db, Product, Scan, Package, File as FileModel
 from ..storage import get_storage
 from .schemas import (
@@ -163,13 +164,18 @@ async def upload_scan(
         param = '%s' if is_postgres else '?'
         
         # Delete files first (foreign key), then packages, then scan
+        # Commit after each to release locks and let PostgreSQL reclaim space
         logger.info("Deleting files...")
         cursor.execute(f"DELETE FROM files WHERE scan_id = {param}", (existing_scan.id,))
-        logger.info(f"Files deleted in {time.time() - delete_start:.1f}s")
+        raw_conn.commit()
+        files_time = time.time() - delete_start
+        logger.info(f"Files deleted in {files_time:.1f}s")
         
         logger.info("Deleting packages...")
+        pkg_start = time.time()
         cursor.execute(f"DELETE FROM packages WHERE scan_id = {param}", (existing_scan.id,))
-        logger.info(f"Packages deleted in {time.time() - delete_start:.1f}s")
+        raw_conn.commit()
+        logger.info(f"Packages deleted in {time.time() - pkg_start:.1f}s")
         
         logger.info("Deleting scan record...")
         cursor.execute(f"DELETE FROM scans WHERE id = {param}", (existing_scan.id,))
@@ -187,11 +193,27 @@ async def upload_scan(
     packages_data = await packages_json.read()
     logger.info(f"Files read: original={len(original_data)/1024/1024:.1f}MB, modified={len(modified_data)/1024/1024:.1f}MB, packages={len(packages_data)/1024:.1f}KB")
 
-    # Parse packages for indexing
+    # Parse packages for indexing - use streaming to reduce memory
     logger.info("Parsing packages JSON...")
     try:
-        packages_json_str = gzip.decompress(packages_data).decode("utf-8")
+        import io
+        # Decompress in streaming fashion
+        with gzip.GzipFile(fileobj=io.BytesIO(packages_data)) as gz:
+            packages_json_str = gz.read().decode("utf-8")
+        # Free the compressed data immediately
+        del packages_data
+        
+        # Parse JSON
         packages_list = json.loads(packages_json_str)
+        # Free the JSON string immediately
+        del packages_json_str
+        
+        import gc
+        gc.collect()
+        logger.info(f"JSON parsed, memory cleaned up")
+    except MemoryError:
+        logger.error("Out of memory parsing packages JSON")
+        raise HTTPException(status_code=507, detail="Server out of memory processing this upload. Try again or contact admin.")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid packages JSON: {e}")
     
@@ -285,78 +307,88 @@ async def upload_scan(
     
     logger.info(f"Packages inserted in {time.time() - bulk_start:.1f}s")
     
-    # Get package IDs
-    logger.info("Retrieving package IDs...")
-    cursor = raw_conn.cursor()
-    cursor.execute("SELECT id, name, version, arch FROM packages WHERE scan_id = %s" if is_postgres else 
-                   "SELECT id, name, version, arch FROM packages WHERE scan_id = ?", (scan.id,))
-    packages_by_key = {(row[1], row[2], row[3]): row[0] for row in cursor.fetchall()}
+    # Check if we should skip file indexing for large scans
+    config = get_config()
+    skip_threshold = config.skip_file_index_threshold
     
-    # Build file tuples
-    logger.info("Preparing file records...")
-    file_tuples = []
-    for pkg in packages_list:
-        key = (pkg.get("name", ""), pkg.get("version"), pkg.get("arch"))
-        package_id = packages_by_key.get(key)
-        if package_id:
-            for f in pkg.get("files", []):
-                file_tuples.append((
-                    package_id,
-                    scan.id,
-                    product.id,
-                    f.get("path", ""),
-                    f.get("digest"),
-                    f.get("digest_algorithm", "sha256"),
-                ))
-    
-    logger.info(f"Inserting {len(file_tuples)} files...")
-    bulk_start = time.time()
-    
-    if is_postgres:
-        # Use COPY for maximum PostgreSQL performance (10-100x faster than INSERT)
-        import io
-        # Create CSV-like data in memory
-        buffer = io.StringIO()
-        for t in file_tuples:
-            # Escape for COPY format: NULL as \N, tab-separated
-            line = '\t'.join(
-                '\\N' if v is None else str(v).replace('\\', '\\\\').replace('\t', '\\t').replace('\n', '\\n')
-                for v in t
-            )
-            buffer.write(line + '\n')
-        buffer.seek(0)
-        
-        cursor = raw_conn.cursor()
-        cursor.copy_from(
-            buffer,
-            'files',
-            columns=('package_id', 'scan_id', 'product_id', 'path', 'digest', 'digest_algorithm'),
-            null='\\N'
-        )
-        raw_conn.commit()
+    if skip_threshold > 0 and total_files > skip_threshold:
+        logger.info(f"Skipping file indexing: {total_files} files exceeds threshold of {skip_threshold}")
+        logger.info("File search will not be available for this scan, but packages are indexed")
+        file_count_actual = 0
     else:
-        # SQLite - use executemany in batches
+        # Get package IDs
+        logger.info("Retrieving package IDs...")
         cursor = raw_conn.cursor()
-        batch_size = 50000
-        for i in range(0, len(file_tuples), batch_size):
-            batch = file_tuples[i:i + batch_size]
-            cursor.executemany(
-                """INSERT INTO files (package_id, scan_id, product_id, path, digest, digest_algorithm)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                batch
+        cursor.execute("SELECT id, name, version, arch FROM packages WHERE scan_id = %s" if is_postgres else 
+                       "SELECT id, name, version, arch FROM packages WHERE scan_id = ?", (scan.id,))
+        packages_by_key = {(row[1], row[2], row[3]): row[0] for row in cursor.fetchall()}
+        
+        # Build file tuples
+        logger.info("Preparing file records...")
+        file_tuples = []
+        for pkg in packages_list:
+            key = (pkg.get("name", ""), pkg.get("version"), pkg.get("arch"))
+            package_id = packages_by_key.get(key)
+            if package_id:
+                for f in pkg.get("files", []):
+                    file_tuples.append((
+                        package_id,
+                        scan.id,
+                        product.id,
+                        f.get("path", ""),
+                        f.get("digest"),
+                        f.get("digest_algorithm", "sha256"),
+                    ))
+        
+        logger.info(f"Inserting {len(file_tuples)} files...")
+        bulk_start = time.time()
+        
+        if is_postgres:
+            # Use COPY for maximum PostgreSQL performance (10-100x faster than INSERT)
+            import io
+            # Create CSV-like data in memory
+            buffer = io.StringIO()
+            for t in file_tuples:
+                # Escape for COPY format: NULL as \N, tab-separated
+                line = '\t'.join(
+                    '\\N' if v is None else str(v).replace('\\', '\\\\').replace('\t', '\\t').replace('\n', '\\n')
+                    for v in t
+                )
+                buffer.write(line + '\n')
+            buffer.seek(0)
+            
+            cursor = raw_conn.cursor()
+            cursor.copy_from(
+                buffer,
+                'files',
+                columns=('package_id', 'scan_id', 'product_id', 'path', 'digest', 'digest_algorithm'),
+                null='\\N'
             )
-            if (i + batch_size) % 500000 == 0:
-                raw_conn.commit()
-                logger.info(f"Files progress: {min(i + batch_size, len(file_tuples))}/{len(file_tuples)}")
-        raw_conn.commit()
-    
-    logger.info(f"Files inserted in {time.time() - bulk_start:.1f}s")
+            raw_conn.commit()
+        else:
+            # SQLite - use executemany in batches
+            cursor = raw_conn.cursor()
+            batch_size = 50000
+            for i in range(0, len(file_tuples), batch_size):
+                batch = file_tuples[i:i + batch_size]
+                cursor.executemany(
+                    """INSERT INTO files (package_id, scan_id, product_id, path, digest, digest_algorithm)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    batch
+                )
+                if (i + batch_size) % 500000 == 0:
+                    raw_conn.commit()
+                    logger.info(f"Files progress: {min(i + batch_size, len(file_tuples))}/{len(file_tuples)}")
+            raw_conn.commit()
+        
+        logger.info(f"Files inserted in {time.time() - bulk_start:.1f}s")
+        file_count_actual = len(file_tuples)
     
     # Refresh session to pick up raw SQL changes
     db.expire_all()
     
     elapsed = time.time() - start_time
-    logger.info(f"Upload complete: {len(packages_list)} packages, {len(file_tuples)} files in {elapsed:.1f}s")
+    logger.info(f"Upload complete: {len(packages_list)} packages, {file_count_actual} files indexed in {elapsed:.1f}s")
 
     return ScanResponse(
         id=scan.id,

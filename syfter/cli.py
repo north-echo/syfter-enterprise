@@ -98,6 +98,7 @@ def main(ctx, server_url: Optional[str], force_local: bool):
 @click.option("--pull-first", is_flag=True, help="Pull image with skopeo first")
 @click.option("--arch", type=click.Choice(["amd64", "arm64", "ppc64le", "s390x"]), default=None)
 @click.option("-q", "--quiet", is_flag=True, help="Suppress progress output")
+@click.option("--skip-files", is_flag=True, help="Skip file indexing (faster, uses less memory)")
 @click.pass_context
 def scan(
     ctx,
@@ -114,6 +115,7 @@ def scan(
     pull_first: bool,
     arch: Optional[str],
     quiet: bool,
+    skip_files: bool,
 ):
     """Scan a target and store the SBOM with product metadata."""
     try:
@@ -163,7 +165,10 @@ def scan(
         sys.exit(1)
 
     modified_sbom = modify_sbom(original_sbom, prod)
-    packages = extract_packages(modified_sbom)
+    packages = extract_packages(modified_sbom, skip_files=skip_files)
+    
+    if skip_files:
+        console.print("[yellow]Note: File indexing skipped (--skip-files). File search won't work for this scan.[/yellow]")
 
     if output:
         output.write_text(json.dumps(modified_sbom, indent=2))

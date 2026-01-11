@@ -49,6 +49,31 @@ docker-compose logs -f api
 
 The API will be available at http://localhost:8000
 
+### Running on ARM Macs (Apple Silicon)
+
+For better performance on ARM Macs, use native ARM64 containers:
+
+```bash
+cd docker
+
+# Set platform to ARM64
+export DOCKER_DEFAULT_PLATFORM=linux/arm64
+
+# Create .env file
+cat > .env << EOF
+POSTGRES_PASSWORD=your_secure_password
+MINIO_ROOT_USER=minio_admin
+MINIO_ROOT_PASSWORD=your_minio_password
+DOCKER_DEFAULT_PLATFORM=linux/arm64
+EOF
+
+# Build and start with ARM images (for podman-compose)
+podman-compose build
+podman-compose up -d
+```
+
+**Note**: Running x86_64 (amd64) containers under emulation on ARM Macs is significantly slower (5-10x) due to QEMU emulation overhead. Use native ARM64 images whenever possible for development.
+
 ## Manual Setup
 
 ### 1. PostgreSQL Setup
@@ -319,3 +344,29 @@ psql -U syfter -d syfter -c "ANALYZE;"
 - Increase `SYFTER_TIMEOUT` on client
 - Check MinIO disk space
 - Check PostgreSQL connection limits
+- For very large scans (e.g., RHEL with 8M+ files), use `--skip-files` to disable file indexing:
+  ```bash
+  rh-syfter scan /path/to/rpms -p rhel -v 10.0 --skip-files
+  ```
+- Increase server memory or reduce worker count
+
+### Large scans (Linux distributions)
+
+Linux distribution scans (RHEL, Fedora) can have millions of files. To handle these:
+
+1. **Skip file indexing on client** (recommended for distro scans):
+   ```bash
+   rh-syfter scan /path/to/rpms -p rhel -v 10.0 --skip-files
+   ```
+   This reduces the packages JSON from ~300MB to ~1MB.
+
+2. **Increase server memory**: Set container memory limit to 8GB+
+
+3. **Server-side threshold**: The server auto-skips file indexing for scans with >100K files.
+   Configure with `SYFTER_SKIP_FILE_INDEX_THRESHOLD`:
+   ```yaml
+   environment:
+     SYFTER_SKIP_FILE_INDEX_THRESHOLD: 50000  # Skip file indexing above 50K files
+   ```
+
+**Trade-off**: File search (`rh-syfter query -f /path/to/file`) won't work for scans without file indexing. Package search still works.
