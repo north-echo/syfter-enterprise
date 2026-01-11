@@ -144,18 +144,41 @@ async def upload_scan(
     )
     if existing_scan:
         logger.info(f"Deleting existing scan {existing_scan.id}")
+        delete_start = time.time()
+        
         # Delete old SBOM files from storage
         try:
             storage.delete(existing_scan.original_sbom_key)
             storage.delete(existing_scan.modified_sbom_key)
         except Exception:
             pass  # Ignore storage errors
-        # Explicitly delete related records
-        db.query(FileModel).filter(FileModel.scan_id == existing_scan.id).delete()
-        db.query(Package).filter(Package.scan_id == existing_scan.id).delete()
-        db.delete(existing_scan)
-        db.commit()
-        logger.info("Existing scan deleted")
+        
+        # Use raw SQL for fast deletion (ORM is extremely slow for millions of rows)
+        connection = db.connection()
+        raw_conn = connection.connection.dbapi_connection
+        cursor = raw_conn.cursor()
+        
+        # Check if PostgreSQL or SQLite
+        is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
+        param = '%s' if is_postgres else '?'
+        
+        # Delete files first (foreign key), then packages, then scan
+        logger.info("Deleting files...")
+        cursor.execute(f"DELETE FROM files WHERE scan_id = {param}", (existing_scan.id,))
+        logger.info(f"Files deleted in {time.time() - delete_start:.1f}s")
+        
+        logger.info("Deleting packages...")
+        cursor.execute(f"DELETE FROM packages WHERE scan_id = {param}", (existing_scan.id,))
+        logger.info(f"Packages deleted in {time.time() - delete_start:.1f}s")
+        
+        logger.info("Deleting scan record...")
+        cursor.execute(f"DELETE FROM scans WHERE id = {param}", (existing_scan.id,))
+        raw_conn.commit()
+        
+        # Refresh ORM session
+        db.expire_all()
+        
+        logger.info(f"Existing scan deleted in {time.time() - delete_start:.1f}s")
 
     # Read uploaded files
     logger.info("Reading uploaded files...")
@@ -206,74 +229,134 @@ async def upload_scan(
     scan.original_sbom_key = original_key
     scan.modified_sbom_key = modified_key
 
-    # Index packages and files using bulk inserts for better performance
-    logger.info("Indexing packages and files with bulk inserts...")
+    # Index packages and files using raw SQL for maximum performance
+    logger.info("Indexing packages and files...")
     
-    # Prepare all package data for bulk insert
-    package_mappings = []
-    for pkg_data in packages_list:
-        package_mappings.append({
-            "scan_id": scan.id,
-            "product_id": product.id,
-            "name": pkg_data.get("name", ""),
-            "version": pkg_data.get("version"),
-            "release": pkg_data.get("release"),
-            "arch": pkg_data.get("arch"),
-            "epoch": pkg_data.get("epoch"),
-            "source_rpm": pkg_data.get("source_rpm"),
-            "license": pkg_data.get("license"),
-            "purl": pkg_data.get("purl"),
-            "cpes": pkg_data.get("cpes"),
-        })
+    # Use raw connection for fast bulk inserts
+    connection = db.connection()
+    raw_conn = connection.connection.dbapi_connection
     
-    # Bulk insert packages
-    logger.info(f"Bulk inserting {len(package_mappings)} packages...")
+    # Check if PostgreSQL or SQLite by looking at the connection type
+    is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
+    
+    # Insert packages and get their IDs
+    logger.info(f"Inserting {len(packages_list)} packages...")
     bulk_start = time.time()
-    db.bulk_insert_mappings(Package, package_mappings)
-    db.commit()
+    
+    # Build package tuples
+    package_tuples = [
+        (
+            scan.id,
+            product.id,
+            pkg.get("name", ""),
+            pkg.get("version"),
+            pkg.get("release"),
+            pkg.get("arch"),
+            pkg.get("epoch"),
+            pkg.get("source_rpm"),
+            pkg.get("license"),
+            pkg.get("purl"),
+            pkg.get("cpes"),
+        )
+        for pkg in packages_list
+    ]
+    
+    if is_postgres:
+        # Use PostgreSQL's execute_values for fast bulk insert
+        from psycopg2.extras import execute_values
+        cursor = raw_conn.cursor()
+        execute_values(
+            cursor,
+            """INSERT INTO packages (scan_id, product_id, name, version, release, arch, epoch, source_rpm, license, purl, cpes)
+               VALUES %s""",
+            package_tuples,
+            page_size=1000
+        )
+        raw_conn.commit()
+    else:
+        # SQLite - use executemany
+        cursor = raw_conn.cursor()
+        cursor.executemany(
+            """INSERT INTO packages (scan_id, product_id, name, version, release, arch, epoch, source_rpm, license, purl, cpes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            package_tuples
+        )
+        raw_conn.commit()
+    
     logger.info(f"Packages inserted in {time.time() - bulk_start:.1f}s")
     
-    # Get package IDs by querying back (we need them for file foreign keys)
-    # This is faster than individual flushes
+    # Get package IDs
     logger.info("Retrieving package IDs...")
-    packages_by_name = {}
-    for pkg in db.query(Package).filter(Package.scan_id == scan.id).all():
-        # Key by name+version+arch to handle duplicates
-        key = (pkg.name, pkg.version, pkg.arch)
-        packages_by_name[key] = pkg.id
+    cursor = raw_conn.cursor()
+    cursor.execute("SELECT id, name, version, arch FROM packages WHERE scan_id = %s" if is_postgres else 
+                   "SELECT id, name, version, arch FROM packages WHERE scan_id = ?", (scan.id,))
+    packages_by_key = {(row[1], row[2], row[3]): row[0] for row in cursor.fetchall()}
     
-    # Prepare file data for bulk insert
+    # Build file tuples
     logger.info("Preparing file records...")
-    file_mappings = []
-    for pkg_data in packages_list:
-        key = (pkg_data.get("name", ""), pkg_data.get("version"), pkg_data.get("arch"))
-        package_id = packages_by_name.get(key)
+    file_tuples = []
+    for pkg in packages_list:
+        key = (pkg.get("name", ""), pkg.get("version"), pkg.get("arch"))
+        package_id = packages_by_key.get(key)
         if package_id:
-            for file_data in pkg_data.get("files", []):
-                file_mappings.append({
-                    "package_id": package_id,
-                    "scan_id": scan.id,
-                    "product_id": product.id,
-                    "path": file_data.get("path", ""),
-                    "digest": file_data.get("digest"),
-                    "digest_algorithm": file_data.get("digest_algorithm", "sha256"),
-                })
+            for f in pkg.get("files", []):
+                file_tuples.append((
+                    package_id,
+                    scan.id,
+                    product.id,
+                    f.get("path", ""),
+                    f.get("digest"),
+                    f.get("digest_algorithm", "sha256"),
+                ))
     
-    # Bulk insert files in batches (can be millions of rows)
-    logger.info(f"Bulk inserting {len(file_mappings)} files...")
+    logger.info(f"Inserting {len(file_tuples)} files...")
     bulk_start = time.time()
-    batch_size = 10000
-    for i in range(0, len(file_mappings), batch_size):
-        batch = file_mappings[i:i + batch_size]
-        db.bulk_insert_mappings(FileModel, batch)
-        if (i + batch_size) % 100000 == 0:
-            db.commit()
-            logger.info(f"Files progress: {min(i + batch_size, len(file_mappings))}/{len(file_mappings)}")
-    db.commit()
+    
+    if is_postgres:
+        # Use COPY for maximum PostgreSQL performance (10-100x faster than INSERT)
+        import io
+        # Create CSV-like data in memory
+        buffer = io.StringIO()
+        for t in file_tuples:
+            # Escape for COPY format: NULL as \N, tab-separated
+            line = '\t'.join(
+                '\\N' if v is None else str(v).replace('\\', '\\\\').replace('\t', '\\t').replace('\n', '\\n')
+                for v in t
+            )
+            buffer.write(line + '\n')
+        buffer.seek(0)
+        
+        cursor = raw_conn.cursor()
+        cursor.copy_from(
+            buffer,
+            'files',
+            columns=('package_id', 'scan_id', 'product_id', 'path', 'digest', 'digest_algorithm'),
+            null='\\N'
+        )
+        raw_conn.commit()
+    else:
+        # SQLite - use executemany in batches
+        cursor = raw_conn.cursor()
+        batch_size = 50000
+        for i in range(0, len(file_tuples), batch_size):
+            batch = file_tuples[i:i + batch_size]
+            cursor.executemany(
+                """INSERT INTO files (package_id, scan_id, product_id, path, digest, digest_algorithm)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                batch
+            )
+            if (i + batch_size) % 500000 == 0:
+                raw_conn.commit()
+                logger.info(f"Files progress: {min(i + batch_size, len(file_tuples))}/{len(file_tuples)}")
+        raw_conn.commit()
+    
     logger.info(f"Files inserted in {time.time() - bulk_start:.1f}s")
     
+    # Refresh session to pick up raw SQL changes
+    db.expire_all()
+    
     elapsed = time.time() - start_time
-    logger.info(f"Upload complete: {len(package_mappings)} packages, {len(file_mappings)} files in {elapsed:.1f}s")
+    logger.info(f"Upload complete: {len(packages_list)} packages, {len(file_tuples)} files in {elapsed:.1f}s")
 
     return ScanResponse(
         id=scan.id,
@@ -306,8 +389,16 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db)):
     except Exception:
         pass  # Ignore storage errors during deletion
 
-    # Explicitly delete related records (in case cascade doesn't work)
-    db.query(FileModel).filter(FileModel.scan_id == scan_id).delete()
-    db.query(Package).filter(Package.scan_id == scan_id).delete()
-    db.delete(scan)
-    db.commit()
+    # Use raw SQL for fast deletion
+    connection = db.connection()
+    raw_conn = connection.connection.dbapi_connection
+    cursor = raw_conn.cursor()
+    
+    is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
+    param = '%s' if is_postgres else '?'
+    
+    cursor.execute(f"DELETE FROM files WHERE scan_id = {param}", (scan_id,))
+    cursor.execute(f"DELETE FROM packages WHERE scan_id = {param}", (scan_id,))
+    cursor.execute(f"DELETE FROM scans WHERE id = {param}", (scan_id,))
+    raw_conn.commit()
+    db.expire_all()

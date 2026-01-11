@@ -188,7 +188,7 @@ class SyfterClient:
                 "-F", f"modified_sbom=@{modified_path};type=application/gzip",
                 "-F", f"packages_json=@{packages_path};type=application/gzip",
                 "--connect-timeout", "30",
-                "--max-time", "3600",  # 1 hour max
+                "--max-time", "10800",  # 3 hours max for very large uploads
             ]
             
             result = subprocess.run(curl_cmd, capture_output=True, text=True)
