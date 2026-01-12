@@ -203,14 +203,15 @@ def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, mo
 
 
 def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages):
-    """Store scan using API server."""
+    """Store scan using API server with async job-based flow."""
     from .client import SyfterClient, APIError
     import httpx
 
     server_url = ctx.obj["server_url"]
     try:
         with SyfterClient(server_url) as client:
-            result = client.upload_scan(
+            # Use async job-based upload for memory efficiency
+            result = client.upload_scan_async(
                 product_name=prod.name,
                 product_version=prod.version,
                 source_path=target,
@@ -220,7 +221,8 @@ def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, m
                 modified_sbom=modified_sbom,
                 packages=packages,
             )
-            console.print(f"[green]✓ Scan #{result['id']} uploaded to server[/green]")
+            scan_id = result.get("scan_id", "unknown")
+            console.print(f"[green]✓ Scan #{scan_id} uploaded to server (job: {result['id']})[/green]")
     except httpx.ConnectError:
         console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
         console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))
@@ -516,6 +518,129 @@ def check():
         console.print(f"[green]✓ Syft is installed (version {version})[/green]")
     except SyftNotFoundError as e:
         console.print(f"[red]✗ {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("jobs")
+@click.option("-s", "--status", type=click.Choice(["pending", "processing", "complete", "failed"]), help="Filter by status")
+@click.option("-p", "--product", help="Filter by product name")
+@click.option("--limit", type=int, default=20, help="Maximum results")
+@click.pass_context
+def list_jobs(ctx, status, product, limit):
+    """List import jobs (server mode only)."""
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Jobs are only available in server mode[/yellow]")
+        return
+    
+    from .client import SyfterClient, APIError
+    import httpx
+    
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            result = client.list_jobs(status=status, product_name=product, limit=limit)
+            jobs = result.get("jobs", [])
+            
+            if not jobs:
+                console.print("[yellow]No jobs found[/yellow]")
+                return
+            
+            table = Table(title=f"Import Jobs ({result.get('total', len(jobs))} total)", box=box.SIMPLE)
+            table.add_column("ID", style="dim", max_width=8)
+            table.add_column("Product", style="cyan")
+            table.add_column("Status", style="bold")
+            table.add_column("Packages", justify="right")
+            table.add_column("Files", justify="right")
+            table.add_column("Created", style="dim")
+            
+            for job in jobs:
+                status_style = {
+                    "pending": "yellow",
+                    "processing": "blue",
+                    "complete": "green",
+                    "failed": "red",
+                }.get(job["status"], "white")
+                
+                created = job.get("created_at", "")[:19].replace("T", " ")
+                
+                table.add_row(
+                    job["id"][:8],
+                    f"{job['product_name']}-{job['product_version']}",
+                    f"[{status_style}]{job['status']}[/{status_style}]",
+                    f"{job['processed_packages']}/{job['total_packages']}",
+                    f"{job['processed_files']}/{job['total_files']}",
+                    created,
+                )
+            console.print(table)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Failed to list jobs: {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("job")
+@click.argument("job_id")
+@click.option("--wait", is_flag=True, help="Wait for job to complete")
+@click.option("--cancel", is_flag=True, help="Cancel the job")
+@click.pass_context
+def job_detail(ctx, job_id, wait, cancel):
+    """Get details of a specific job or wait for it to complete."""
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Jobs are only available in server mode[/yellow]")
+        return
+    
+    from .client import SyfterClient, APIError
+    import httpx
+    
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            if cancel:
+                result = client.cancel_job(job_id)
+                console.print(f"[green]Job {job_id} cancelled[/green]")
+                return
+            
+            if wait:
+                console.print(f"[dim]Waiting for job {job_id} to complete...[/dim]")
+                job = client.wait_for_job(job_id)
+            else:
+                job = client.get_job(job_id)
+            
+            status_style = {
+                "pending": "yellow",
+                "processing": "blue",
+                "complete": "green",
+                "failed": "red",
+            }.get(job["status"], "white")
+            
+            info = (
+                f"[bold]Job ID:[/bold] {job['id']}\n"
+                f"[bold]Status:[/bold] [{status_style}]{job['status']}[/{status_style}]\n"
+                f"[bold]Product:[/bold] {job['product_name']}-{job['product_version']}\n"
+                f"[bold]Source:[/bold] {job['source_path']}\n"
+                f"[bold]Packages:[/bold] {job['processed_packages']}/{job['total_packages']}\n"
+                f"[bold]Files:[/bold] {job['processed_files']}/{job['total_files']}\n"
+            )
+            
+            if job.get("scan_id"):
+                info += f"[bold]Scan ID:[/bold] {job['scan_id']}\n"
+            
+            if job.get("error_message"):
+                info += f"[bold]Error:[/bold] [red]{job['error_message']}[/red]\n"
+            
+            if job.get("created_at"):
+                info += f"[bold]Created:[/bold] {job['created_at'][:19].replace('T', ' ')}\n"
+            if job.get("started_at"):
+                info += f"[bold]Started:[/bold] {job['started_at'][:19].replace('T', ' ')}\n"
+            if job.get("completed_at"):
+                info += f"[bold]Completed:[/bold] {job['completed_at'][:19].replace('T', ' ')}\n"
+            
+            console.print(Panel(info, title="Job Details", box=box.ROUNDED))
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Job operation failed: {e}[/red]")
         sys.exit(1)
 
 

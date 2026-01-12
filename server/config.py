@@ -72,6 +72,7 @@ class StorageConfig:
 
     # S3/MinIO settings
     s3_endpoint: Optional[str] = None  # None = AWS S3, set for MinIO
+    s3_external_endpoint: Optional[str] = None  # External URL for presigned URLs (for clients outside container network)
     s3_bucket: str = "syfter-sboms"
     s3_access_key: str = ""
     s3_secret_key: str = ""
@@ -87,6 +88,7 @@ class StorageConfig:
             return cls(
                 type="s3",
                 s3_endpoint=os.getenv("SYFTER_S3_ENDPOINT"),  # None for AWS S3
+                s3_external_endpoint=os.getenv("SYFTER_S3_EXTERNAL_ENDPOINT"),  # For presigned URLs
                 s3_bucket=os.getenv("SYFTER_S3_BUCKET", "syfter-sboms"),
                 s3_access_key=os.getenv("SYFTER_S3_ACCESS_KEY", ""),
                 s3_secret_key=os.getenv("SYFTER_S3_SECRET_KEY", ""),

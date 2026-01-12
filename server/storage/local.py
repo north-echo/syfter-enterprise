@@ -55,3 +55,32 @@ class LocalStorage(StorageBackend):
         """Get a file:// URL for local storage."""
         path = self._get_path(key)
         return f"file://{path.absolute()}"
+
+    def get_presigned_upload_url(self, key: str, expires_in: int = 3600) -> str:
+        """
+        Get URL for uploading (for local storage, returns file:// path).
+        
+        Note: Local storage doesn't support presigned URLs, so this returns
+        a special URL that the client should interpret as a local path.
+        """
+        path = self._get_path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return f"file://{path.absolute()}"
+
+    def copy(self, src_key: str, dst_key: str) -> bool:
+        """Copy data from one key to another."""
+        import shutil
+        src_path = self._get_path(src_key)
+        dst_path = self._get_path(dst_key)
+        if not src_path.exists():
+            return False
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, dst_path)
+        return True
+
+    def get_size(self, key: str) -> int:
+        """Get the size of stored data."""
+        path = self._get_path(key)
+        if path.exists():
+            return path.stat().st_size
+        return 0

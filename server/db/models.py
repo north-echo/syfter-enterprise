@@ -137,3 +137,49 @@ class File(Base):
         Index("idx_file_digest", "digest"),
         Index("idx_file_scan", "scan_id"),
     )
+
+
+class Job(Base):
+    """Job model - tracks async import jobs."""
+
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)  # UUID
+    product_id: Mapped[Optional[int]] = mapped_column(ForeignKey("products.id"), nullable=True)
+    scan_id: Mapped[Optional[int]] = mapped_column(ForeignKey("scans.id"), nullable=True)
+    
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, processing, complete, failed
+    job_type: Mapped[str] = mapped_column(String(50), default="scan_import")
+    
+    # S3 keys for uploaded files
+    original_sbom_key: Mapped[Optional[str]] = mapped_column(String(500))
+    modified_sbom_key: Mapped[Optional[str]] = mapped_column(String(500))
+    packages_tsv_key: Mapped[Optional[str]] = mapped_column(String(500))
+    files_tsv_key: Mapped[Optional[str]] = mapped_column(String(500))
+    
+    # Metadata
+    product_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    product_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_path: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(50), default="directory")
+    syft_version: Mapped[Optional[str]] = mapped_column(String(50))
+    
+    # Progress tracking
+    total_packages: Mapped[int] = mapped_column(Integer, default=0)
+    total_files: Mapped[int] = mapped_column(Integer, default=0)
+    processed_packages: Mapped[int] = mapped_column(Integer, default=0)
+    processed_files: Mapped[int] = mapped_column(Integer, default=0)
+    
+    # Error tracking
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+
+    __table_args__ = (
+        Index("idx_job_status", "status"),
+        Index("idx_job_product", "product_id"),
+        Index("idx_job_created", "created_at"),
+    )

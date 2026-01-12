@@ -203,5 +203,67 @@ class StatsResponse(BaseModel):
     database_type: str
 
 
+# Job schemas
+class JobCreate(BaseModel):
+    """Schema for creating an import job."""
+    
+    product_name: str = Field(..., description="Product name")
+    product_version: str = Field(..., description="Product version")
+    source_path: str = Field(..., description="Source path that was scanned")
+    source_type: str = Field(default="directory", description="Type of source")
+    syft_version: Optional[str] = Field(default=None, description="Syft version used")
+    total_packages: int = Field(default=0, description="Total package count")
+    total_files: int = Field(default=0, description="Total file count")
+
+
+class JobUploadUrls(BaseModel):
+    """Response with presigned URLs for job file uploads."""
+    
+    job_id: str
+    original_sbom_url: str
+    modified_sbom_url: str
+    packages_tsv_url: str
+    files_tsv_url: str
+    expires_in: int = 3600
+
+
+class JobResponse(BaseModel):
+    """Schema for job status response."""
+    
+    id: str
+    status: str  # pending, uploading, processing, complete, failed
+    job_type: str
+    product_name: str
+    product_version: str
+    source_path: str
+    source_type: str
+    syft_version: Optional[str]
+    total_packages: int
+    total_files: int
+    processed_packages: int
+    processed_files: int
+    error_message: Optional[str]
+    scan_id: Optional[int]
+    created_at: datetime
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    
+    class Config:
+        from_attributes = True
+
+
+class JobListResponse(BaseModel):
+    """Schema for job list response."""
+    
+    jobs: List[JobResponse]
+    total: int
+
+
+class JobStartRequest(BaseModel):
+    """Request to start processing an uploaded job."""
+    
+    pass  # No additional fields needed, job_id is in URL
+
+
 # Update forward references
 PackageCreate.model_rebuild()

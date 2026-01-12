@@ -86,6 +86,47 @@ class StorageBackend(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_presigned_upload_url(self, key: str, expires_in: int = 3600) -> str:
+        """
+        Get a presigned URL for uploading data.
+
+        Args:
+            key: Storage key/path
+            expires_in: URL expiration in seconds
+
+        Returns:
+            str: Presigned URL for PUT upload
+        """
+        pass
+
+    @abstractmethod
+    def copy(self, src_key: str, dst_key: str) -> bool:
+        """
+        Copy data from one key to another.
+
+        Args:
+            src_key: Source key
+            dst_key: Destination key
+
+        Returns:
+            bool: True if successful
+        """
+        pass
+
+    @abstractmethod
+    def get_size(self, key: str) -> int:
+        """
+        Get the size of stored data.
+
+        Args:
+            key: Storage key/path
+
+        Returns:
+            int: Size in bytes
+        """
+        pass
+
     def put_json(self, key: str, data: dict, compress: bool = True) -> int:
         """
         Store JSON data, optionally compressed.

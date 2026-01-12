@@ -38,6 +38,21 @@ class S3Storage(StorageBackend):
             )
 
         self.client = boto3.client("s3", **client_kwargs)
+        
+        # Create a separate client for external presigned URLs if configured
+        self.external_client = None
+        if config.s3_external_endpoint and config.s3_external_endpoint != config.s3_endpoint:
+            external_kwargs = {
+                "aws_access_key_id": config.s3_access_key,
+                "aws_secret_access_key": config.s3_secret_key,
+                "region_name": config.s3_region,
+                "endpoint_url": config.s3_external_endpoint,
+                "config": boto3.session.Config(
+                    signature_version="s3v4",
+                    s3={"addressing_style": "path"},
+                ),
+            }
+            self.external_client = boto3.client("s3", **external_kwargs)
 
         # Ensure bucket exists
         self._ensure_bucket()
@@ -103,17 +118,42 @@ class S3Storage(StorageBackend):
             return False
 
     def get_url(self, key: str, expires_in: int = 3600) -> str:
-        """Get a presigned URL for the object."""
-        return self.client.generate_presigned_url(
+        """Get a presigned URL for the object (uses external endpoint if configured)."""
+        client = self.external_client or self.client
+        return client.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket, "Key": key},
             ExpiresIn=expires_in,
         )
 
-    def get_upload_url(self, key: str, expires_in: int = 3600) -> str:
-        """Get a presigned URL for uploading."""
-        return self.client.generate_presigned_url(
+    def get_presigned_upload_url(self, key: str, expires_in: int = 3600) -> str:
+        """Get a presigned URL for uploading (uses external endpoint if configured)."""
+        client = self.external_client or self.client
+        return client.generate_presigned_url(
             "put_object",
             Params={"Bucket": self.bucket, "Key": key},
             ExpiresIn=expires_in,
         )
+
+    # Alias for backward compatibility
+    get_upload_url = get_presigned_upload_url
+
+    def copy(self, src_key: str, dst_key: str) -> bool:
+        """Copy data from one key to another."""
+        try:
+            self.client.copy_object(
+                Bucket=self.bucket,
+                CopySource={"Bucket": self.bucket, "Key": src_key},
+                Key=dst_key,
+            )
+            return True
+        except ClientError:
+            return False
+
+    def get_size(self, key: str) -> int:
+        """Get the size of stored data."""
+        try:
+            response = self.client.head_object(Bucket=self.bucket, Key=key)
+            return response.get("ContentLength", 0)
+        except ClientError:
+            return 0
