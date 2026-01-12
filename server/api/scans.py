@@ -262,7 +262,8 @@ async def upload_scan(
     is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
     
     # Insert packages and get their IDs
-    logger.info(f"Inserting {len(packages_list)} packages...")
+    packages_count = len(packages_list)
+    logger.info(f"Inserting {packages_count} packages...")
     bulk_start = time.time()
     
     # Build package tuples
@@ -323,72 +324,110 @@ async def upload_scan(
                        "SELECT id, name, version, arch FROM packages WHERE scan_id = ?", (scan.id,))
         packages_by_key = {(row[1], row[2], row[3]): row[0] for row in cursor.fetchall()}
         
-        # Build file tuples
-        logger.info("Preparing file records...")
-        file_tuples = []
-        for pkg in packages_list:
-            key = (pkg.get("name", ""), pkg.get("version"), pkg.get("arch"))
-            package_id = packages_by_key.get(key)
-            if package_id:
-                for f in pkg.get("files", []):
-                    file_tuples.append((
-                        package_id,
-                        scan.id,
-                        product.id,
-                        f.get("path", ""),
-                        f.get("digest"),
-                        f.get("digest_algorithm", "sha256"),
-                    ))
-        
-        logger.info(f"Inserting {len(file_tuples)} files...")
+        logger.info(f"Inserting {total_files} files...")
         bulk_start = time.time()
+        file_count_actual = 0
         
         if is_postgres:
-            # Use COPY for maximum PostgreSQL performance (10-100x faster than INSERT)
-            import io
-            # Create CSV-like data in memory
-            buffer = io.StringIO()
-            for t in file_tuples:
-                # Escape for COPY format: NULL as \N, tab-separated
-                line = '\t'.join(
-                    '\\N' if v is None else str(v).replace('\\', '\\\\').replace('\t', '\\t').replace('\n', '\\n')
-                    for v in t
-                )
-                buffer.write(line + '\n')
-            buffer.seek(0)
+            # Stream files directly to a temp file, then COPY - avoids holding all in memory
+            import tempfile
+            import os
             
+            logger.info("Writing files to temp file for COPY...")
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as tmp:
+                tmp_path = tmp.name
+                for pkg in packages_list:
+                    key = (pkg.get("name", ""), pkg.get("version"), pkg.get("arch"))
+                    package_id = packages_by_key.get(key)
+                    if package_id:
+                        for f in pkg.get("files", []):
+                            # Format for COPY: tab-separated, \N for NULL
+                            path = f.get("path", "")
+                            digest = f.get("digest")
+                            algo = f.get("digest_algorithm", "sha256")
+                            
+                            # Escape special chars
+                            path = path.replace('\\', '\\\\').replace('\t', '\\t').replace('\n', '\\n') if path else ''
+                            digest_str = digest.replace('\\', '\\\\') if digest else '\\N'
+                            algo_str = algo.replace('\\', '\\\\') if algo else '\\N'
+                            
+                            tmp.write(f"{package_id}\t{scan.id}\t{product.id}\t{path}\t{digest_str}\t{algo_str}\n")
+                            file_count_actual += 1
+                            
+                            # Log progress periodically
+                            if file_count_actual % 1000000 == 0:
+                                logger.info(f"Files written to temp: {file_count_actual}/{total_files}")
+            
+            logger.info(f"Temp file written: {file_count_actual} files, {os.path.getsize(tmp_path)/1024/1024:.1f}MB")
+            
+            # Free packages_list memory before COPY
+            del packages_list
+            import gc
+            gc.collect()
+            logger.info("Memory freed, starting COPY...")
+            
+            # COPY from file
             cursor = raw_conn.cursor()
-            cursor.copy_from(
-                buffer,
-                'files',
-                columns=('package_id', 'scan_id', 'product_id', 'path', 'digest', 'digest_algorithm'),
-                null='\\N'
-            )
+            with open(tmp_path, 'r') as f:
+                cursor.copy_from(
+                    f,
+                    'files',
+                    columns=('package_id', 'scan_id', 'product_id', 'path', 'digest', 'digest_algorithm'),
+                    null='\\N'
+                )
             raw_conn.commit()
+            
+            # Clean up temp file
+            os.unlink(tmp_path)
+            logger.info(f"COPY complete")
         else:
-            # SQLite - use executemany in batches
+            # SQLite - stream directly without building full list
             cursor = raw_conn.cursor()
+            batch = []
             batch_size = 50000
-            for i in range(0, len(file_tuples), batch_size):
-                batch = file_tuples[i:i + batch_size]
+            
+            for pkg in packages_list:
+                key = (pkg.get("name", ""), pkg.get("version"), pkg.get("arch"))
+                package_id = packages_by_key.get(key)
+                if package_id:
+                    for f in pkg.get("files", []):
+                        batch.append((
+                            package_id,
+                            scan.id,
+                            product.id,
+                            f.get("path", ""),
+                            f.get("digest"),
+                            f.get("digest_algorithm", "sha256"),
+                        ))
+                        file_count_actual += 1
+                        
+                        if len(batch) >= batch_size:
+                            cursor.executemany(
+                                """INSERT INTO files (package_id, scan_id, product_id, path, digest, digest_algorithm)
+                                   VALUES (?, ?, ?, ?, ?, ?)""",
+                                batch
+                            )
+                            batch = []
+                            if file_count_actual % 500000 == 0:
+                                raw_conn.commit()
+                                logger.info(f"Files progress: {file_count_actual}/{total_files}")
+            
+            # Insert remaining
+            if batch:
                 cursor.executemany(
                     """INSERT INTO files (package_id, scan_id, product_id, path, digest, digest_algorithm)
                        VALUES (?, ?, ?, ?, ?, ?)""",
                     batch
                 )
-                if (i + batch_size) % 500000 == 0:
-                    raw_conn.commit()
-                    logger.info(f"Files progress: {min(i + batch_size, len(file_tuples))}/{len(file_tuples)}")
             raw_conn.commit()
         
         logger.info(f"Files inserted in {time.time() - bulk_start:.1f}s")
-        file_count_actual = len(file_tuples)
     
     # Refresh session to pick up raw SQL changes
     db.expire_all()
     
     elapsed = time.time() - start_time
-    logger.info(f"Upload complete: {len(packages_list)} packages, {file_count_actual} files indexed in {elapsed:.1f}s")
+    logger.info(f"Upload complete: {packages_count} packages, {file_count_actual} files indexed in {elapsed:.1f}s")
 
     return ScanResponse(
         id=scan.id,

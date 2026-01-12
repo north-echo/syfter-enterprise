@@ -16,6 +16,21 @@ services:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    # Tune PostgreSQL for bulk imports
+    command:
+      - "postgres"
+      - "-c" 
+      - "max_wal_size=4GB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "shared_buffers=512MB"
+      - "-c"
+      - "work_mem=256MB"
+      - "-c"
+      - "maintenance_work_mem=512MB"
+      - "-c"
+      - "wal_buffers=64MB"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U syfter"]
       interval: 10s
@@ -74,8 +89,9 @@ services:
       SYFTER_HOST: 0.0.0.0
       SYFTER_PORT: 8000
       SYFTER_WORKERS: 2
-      # Skip file indexing for large scans (>100K files) to avoid OOM
-      SYFTER_SKIP_FILE_INDEX_THRESHOLD: ${SYFTER_SKIP_FILE_INDEX_THRESHOLD:-100000}
+      # Set to 0 to always index files (requires sufficient memory)
+      # Set to a number to auto-skip file indexing above that threshold
+      SYFTER_SKIP_FILE_INDEX_THRESHOLD: ${SYFTER_SKIP_FILE_INDEX_THRESHOLD:-0}
     ports:
       - "8000:8000"
     depends_on:
