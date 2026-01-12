@@ -27,6 +27,18 @@ def _is_debug_package(name: str) -> bool:
     return any(pattern in name_lower for pattern in DEBUG_PACKAGE_PATTERNS)
 
 
+def _is_debug_file(path: str) -> bool:
+    """Check if a file path is a debug-related file (debuginfo/debugsource RPM or in debug directory)."""
+    path_lower = path.lower()
+    # Check for debug patterns in the path
+    if any(pattern in path_lower for pattern in DEBUG_PACKAGE_PATTERNS):
+        return True
+    # Check if file is under a /debug/ directory
+    if "/debug/" in path_lower:
+        return True
+    return False
+
+
 def modify_sbom(sbom: dict, product: Product, exclude_debug: bool = True) -> dict:
     """
     Modify an SBOM to add product-specific metadata.
@@ -65,10 +77,20 @@ def modify_sbom(sbom: dict, product: Product, exclude_debug: bool = True) -> dic
     if exclude_debug:
         original_count = len(artifacts)
         artifacts = [a for a in artifacts if not _is_debug_package(a.get("name", ""))]
-        excluded_count = original_count - len(artifacts)
+        excluded_pkg_count = original_count - len(artifacts)
         modified["artifacts"] = artifacts
-        if excluded_count > 0:
-            console.print(f"[dim]Excluded {excluded_count} debug packages (debuginfo/debugsource)[/dim]")
+        if excluded_pkg_count > 0:
+            console.print(f"[dim]Excluded {excluded_pkg_count} debug packages (debuginfo/debugsource)[/dim]")
+        
+        # Also filter source files (the .rpm file entries themselves)
+        files = modified.get("files", [])
+        if files:
+            original_file_count = len(files)
+            files = [f for f in files if not _is_debug_file(f.get("location", {}).get("path", ""))]
+            excluded_file_count = original_file_count - len(files)
+            modified["files"] = files
+            if excluded_file_count > 0:
+                console.print(f"[dim]Excluded {excluded_file_count} debug source files[/dim]")
     
     for artifact in artifacts:
         _modify_artifact_cpes(artifact, product)

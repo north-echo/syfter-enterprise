@@ -65,14 +65,10 @@ def check_syft_installed() -> str:
             return "unknown"
 
 
-# Patterns for debug packages to exclude from scans
-# Patterns must start with './', '*/', or '**/' per syft requirements
-# Using broader patterns to catch all debug packages
-DEBUG_EXCLUDE_PATTERNS = [
-    "**/*debuginfo*",
-    "**/*debugsource*",
-    "**/debug/**",  # Also exclude anything under debug directories
-]
+# Note: We tried using syft's --exclude patterns to filter debug packages at scan time,
+# but they don't work reliably for RPM directory scans. Instead, we filter debug packages
+# in modify_sbom() after the scan completes. This is actually faster since syft doesn't
+# have to evaluate exclusion patterns for every file.
 
 
 def scan_target(
@@ -132,10 +128,8 @@ def scan_target(
                 cataloger_names.append(c)
         cmd.extend(["--override-default-catalogers", ",".join(cataloger_names)])
 
-    # Exclude debug packages from scan
-    if exclude_debug:
-        for pattern in DEBUG_EXCLUDE_PATTERNS:
-            cmd.extend(["--exclude", pattern])
+    # Note: exclude_debug parameter is kept for API compatibility but syft's --exclude
+    # doesn't work reliably for RPM scans. Debug filtering happens in modify_sbom() instead.
 
     # Add extra arguments
     if extra_args:
