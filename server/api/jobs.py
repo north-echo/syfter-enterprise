@@ -272,33 +272,55 @@ def process_job(job_id: str):
         existing_scans = db.query(Scan).filter(Scan.product_id == product.id).all()
         if existing_scans:
             logger.info(f"Deleting {len(existing_scans)} existing scan(s) for {product.full_name}")
-            raw_conn = db.connection().connection.dbapi_connection
-            is_postgres = 'psycopg' in type(raw_conn).__module__
+            
+            # Use a separate raw connection for deletions to avoid session conflicts
+            from server.db.session import get_engine
+            engine = get_engine()
+            is_postgres = 'postgresql' in str(engine.url)
             
             for old_scan in existing_scans:
-                cursor = raw_conn.cursor()
-                param = (old_scan.id,)
-                
-                # Delete files
-                cursor.execute(
-                    "DELETE FROM files WHERE scan_id = %s" if is_postgres else
-                    "DELETE FROM files WHERE scan_id = ?", param
-                )
-                raw_conn.commit()
-                
-                # Delete packages
-                cursor.execute(
-                    "DELETE FROM packages WHERE scan_id = %s" if is_postgres else
-                    "DELETE FROM packages WHERE scan_id = ?", param
-                )
-                raw_conn.commit()
-                
-                # Delete scan
-                cursor.execute(
-                    "DELETE FROM scans WHERE id = %s" if is_postgres else
-                    "DELETE FROM scans WHERE id = ?", param
-                )
-                raw_conn.commit()
+                if is_postgres:
+                    # Get a fresh connection for deletion
+                    del_conn = engine.raw_connection()
+                    try:
+                        cursor = del_conn.cursor()
+                        param = (old_scan.id,)
+                        
+                        # Disable triggers for fast deletion (avoids FK cascade checks)
+                        cursor.execute("SET session_replication_role = replica;")
+                        
+                        # Delete files
+                        logger.info(f"Deleting files for scan {old_scan.id}...")
+                        cursor.execute("DELETE FROM files WHERE scan_id = %s", param)
+                        del_conn.commit()
+                        logger.info("Files deleted")
+                        
+                        # Delete packages  
+                        logger.info(f"Deleting packages for scan {old_scan.id}...")
+                        cursor.execute("DELETE FROM packages WHERE scan_id = %s", param)
+                        del_conn.commit()
+                        logger.info("Packages deleted")
+                        
+                        # Delete scan
+                        cursor.execute("DELETE FROM scans WHERE id = %s", param)
+                        del_conn.commit()
+                        
+                        # Re-enable triggers (not strictly needed as connection will close)
+                        cursor.execute("SET session_replication_role = DEFAULT;")
+                        del_conn.commit()
+                    finally:
+                        del_conn.close()
+                else:
+                    # SQLite - use session connection
+                    raw_conn = db.connection().connection.dbapi_connection
+                    cursor = raw_conn.cursor()
+                    param = (old_scan.id,)
+                    cursor.execute("DELETE FROM files WHERE scan_id = ?", param)
+                    raw_conn.commit()
+                    cursor.execute("DELETE FROM packages WHERE scan_id = ?", param)
+                    raw_conn.commit()
+                    cursor.execute("DELETE FROM scans WHERE id = ?", param)
+                    raw_conn.commit()
                 
                 # Delete from storage
                 try:
@@ -306,6 +328,11 @@ def process_job(job_id: str):
                     storage.delete(old_scan.modified_sbom_key)
                 except Exception:
                     pass
+                
+                logger.info(f"Scan {old_scan.id} deleted")
+            
+            # Refresh the SQLAlchemy session to pick up changes
+            db.expire_all()
         
         # Move SBOMs to permanent location
         scan_base = f"scans/{product.id}"
@@ -343,12 +370,20 @@ def process_job(job_id: str):
         logger.info(f"Created scan {scan.id}, importing packages...")
         
         # Import packages and files from TSV
-        raw_conn = db.connection().connection.dbapi_connection
-        is_postgres = 'psycopg' in type(raw_conn).__module__
+        # Use a separate connection for heavy import to avoid session issues
+        from server.db.session import get_engine
+        engine = get_engine()
+        is_postgres = 'postgresql' in str(engine.url)
         
         if is_postgres:
-            _import_tsv_postgres(db, raw_conn, storage, job, scan, product)
+            # Get a raw psycopg2 connection for COPY operations
+            import_conn = engine.raw_connection()
+            try:
+                _import_tsv_postgres(db, import_conn, storage, job, scan, product)
+            finally:
+                import_conn.close()
         else:
+            raw_conn = db.connection().connection.dbapi_connection
             _import_tsv_sqlite(db, raw_conn, storage, job, scan, product)
         
         # Update job as complete
