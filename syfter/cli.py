@@ -350,20 +350,56 @@ def _query_server(ctx, name, file_path, digest, product, product_version, limit,
         sys.exit(1)
 
 
+def _get_format_extension(output_format: str) -> str:
+    """Get the file extension for a given format."""
+    extensions = {
+        "syft-json": ".syft.json",
+        "spdx-json": ".spdx.json",
+        "spdx-tv": ".spdx",
+        "cyclonedx-json": ".cdx.json",
+        "cyclonedx-xml": ".cdx.xml",
+    }
+    return extensions.get(output_format, ".json")
+
+
+def _resolve_output_path(output: Optional[Path], product: str, version: str, output_format: str) -> Optional[Path]:
+    """
+    Resolve the output path, inferring filename if output is a directory.
+    
+    Returns None if no output specified (stdout), or the resolved file path.
+    """
+    if output is None:
+        return None
+    
+    # If it's an existing directory, infer filename
+    if output.is_dir():
+        ext = _get_format_extension(output_format)
+        filename = f"{product}-{version}{ext}"
+        return output / filename
+    
+    # If parent doesn't exist yet, that's fine - it will be created
+    # If it's a file path, use as-is
+    return output
+
+
 @main.command("export")
 @click.option("-p", "--product", required=True, help="Product name")
 @click.option("-v", "--version", "product_version", required=True, help="Product version")
 @click.option("-f", "--format", "output_format", 
               type=click.Choice(["syft-json", "spdx-json", "spdx-tv", "cyclonedx-json", "cyclonedx-xml", "all"]),
               default="spdx-json", help="Output format")
-@click.option("-o", "--output", type=click.Path(path_type=Path), help="Output file or directory")
+@click.option("-o", "--output", type=click.Path(path_type=Path), 
+              help="Output file or directory (if directory, filename is inferred as product-version.ext)")
 @click.pass_context
 def export_cmd(ctx, product, product_version, output_format, output):
     """Export a product's SBOM to various formats."""
+    # Resolve output path early, before fetching SBOM
+    resolved_output = _resolve_output_path(output, product, product_version, output_format)
+    
     if ctx.obj["local_mode"]:
-        _export_local(product, product_version, output_format, output)
+        _export_local(product, product_version, output_format, resolved_output)
     else:
-        _export_server(ctx, product, product_version, output_format, output)
+        _export_server(ctx, product, product_version, output_format, resolved_output)
 
 
 def _export_local(product, product_version, output_format, output):
@@ -404,8 +440,9 @@ def _do_export(sbom, product, product_version, output_format, output):
     if output_format == "syft-json":
         output_str = json.dumps(sbom, indent=2)
         if output:
+            output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(output_str)
-            console.print(f"[green]Wrote syft-json to {output}[/green]")
+            console.print(f"[green]✓ Wrote {output_format} to {output}[/green]")
         else:
             click.echo(output_str)
         return
@@ -416,7 +453,9 @@ def _do_export(sbom, product, product_version, output_format, output):
         output.mkdir(parents=True, exist_ok=True)
         base_name = f"{product}-{product_version}"
         results = batch_export(sbom, output, base_name)
-        console.print(f"[green]Exported to {len(results)} formats[/green]")
+        console.print(f"[green]✓ Exported to {len(results)} formats in {output}/[/green]")
+        for fmt, path in results.items():
+            console.print(f"  [dim]{path}[/dim]")
         return
 
     format_map = {
@@ -428,7 +467,9 @@ def _do_export(sbom, product, product_version, output_format, output):
 
     try:
         result = format_map[output_format](sbom, output)
-        if not output:
+        if output:
+            console.print(f"[green]✓ Wrote {output_format} to {output}[/green]")
+        else:
             click.echo(result)
     except ExportError as e:
         console.print(f"[red]Export failed: {e}[/red]")
