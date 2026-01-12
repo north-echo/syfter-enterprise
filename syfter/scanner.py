@@ -67,9 +67,11 @@ def check_syft_installed() -> str:
 
 # Patterns for debug packages to exclude from scans
 # Patterns must start with './', '*/', or '**/' per syft requirements
+# Using broader patterns to catch all debug packages
 DEBUG_EXCLUDE_PATTERNS = [
-    "**/*-debuginfo-*",
-    "**/*-debugsource-*",
+    "**/*debuginfo*",
+    "**/*debugsource*",
+    "**/debug/**",  # Also exclude anything under debug directories
 ]
 
 
