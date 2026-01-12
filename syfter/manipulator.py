@@ -14,12 +14,25 @@ from .models import Product
 
 console = Console()
 
+# Patterns for debug packages to exclude
+DEBUG_PACKAGE_PATTERNS = [
+    "debuginfo",
+    "debugsource",
+]
 
-def modify_sbom(sbom: dict, product: Product) -> dict:
+
+def _is_debug_package(name: str) -> bool:
+    """Check if a package name indicates it's a debug package."""
+    name_lower = name.lower()
+    return any(pattern in name_lower for pattern in DEBUG_PACKAGE_PATTERNS)
+
+
+def modify_sbom(sbom: dict, product: Product, exclude_debug: bool = True) -> dict:
     """
     Modify an SBOM to add product-specific metadata.
 
     This function:
+    - Filters out debug packages (debuginfo, debugsource) if exclude_debug is True
     - Updates CPEs to include the product information
     - Updates PURLs to include the distro qualifier
     - Adds product metadata to the SBOM descriptor
@@ -27,6 +40,7 @@ def modify_sbom(sbom: dict, product: Product) -> dict:
     Args:
         sbom: The original syft-json SBOM
         product: The product metadata to apply
+        exclude_debug: If True, exclude debuginfo and debugsource packages (default: True)
 
     Returns:
         dict: Modified SBOM with product metadata
@@ -45,8 +59,17 @@ def modify_sbom(sbom: dict, product: Product) -> dict:
         "purl_qualifier": product.purl_qualifier,
     }
 
-    # Process artifacts (packages)
+    # Filter and process artifacts (packages)
     artifacts = modified.get("artifacts", [])
+    
+    if exclude_debug:
+        original_count = len(artifacts)
+        artifacts = [a for a in artifacts if not _is_debug_package(a.get("name", ""))]
+        excluded_count = original_count - len(artifacts)
+        modified["artifacts"] = artifacts
+        if excluded_count > 0:
+            console.print(f"[dim]Excluded {excluded_count} debug packages (debuginfo/debugsource)[/dim]")
+    
     for artifact in artifacts:
         _modify_artifact_cpes(artifact, product)
         _modify_artifact_purl(artifact, product)

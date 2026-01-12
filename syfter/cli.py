@@ -99,6 +99,7 @@ def main(ctx, server_url: Optional[str], force_local: bool):
 @click.option("--arch", type=click.Choice(["amd64", "arm64", "ppc64le", "s390x"]), default=None)
 @click.option("-q", "--quiet", is_flag=True, help="Suppress progress output")
 @click.option("--skip-files", is_flag=True, help="Skip file indexing (faster, uses less memory)")
+@click.option("--include-debug", is_flag=True, help="Include debuginfo/debugsource packages (excluded by default)")
 @click.pass_context
 def scan(
     ctx,
@@ -116,6 +117,7 @@ def scan(
     arch: Optional[str],
     quiet: bool,
     skip_files: bool,
+    include_debug: bool,
 ):
     """Scan a target and store the SBOM with product metadata."""
     try:
@@ -145,26 +147,30 @@ def scan(
     console.print(f"[dim]Source type: {source_type}[/dim]")
 
     try:
+        exclude_debug = not include_debug
         if source_type == "directory":
             path = Path(target.replace("dir:", ""))
             original_sbom, syft_version = scan_directory(
-                path, show_progress=not quiet, name=prod.full_name, version=product_version
+                path, show_progress=not quiet, name=prod.full_name, version=product_version,
+                exclude_debug=exclude_debug
             )
         elif source_type == "container":
             container_source = None if source == "auto" else source
             original_sbom, syft_version = scan_container(
                 target, source=container_source, pull_first=pull_first,
-                arch=arch, show_progress=not quiet, name=prod.full_name, version=product_version
+                arch=arch, show_progress=not quiet, name=prod.full_name, version=product_version,
+                exclude_debug=exclude_debug
             )
         else:
             original_sbom, syft_version = scan_target(
-                target, show_progress=not quiet, name=prod.full_name, version=product_version
+                target, show_progress=not quiet, name=prod.full_name, version=product_version,
+                exclude_debug=exclude_debug
             )
     except ScanError as e:
         console.print(f"[red]Scan failed: {e}[/red]")
         sys.exit(1)
 
-    modified_sbom = modify_sbom(original_sbom, prod)
+    modified_sbom = modify_sbom(original_sbom, prod, exclude_debug=not include_debug)
     packages = extract_packages(modified_sbom, skip_files=skip_files)
     
     if skip_files:

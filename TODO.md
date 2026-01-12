@@ -306,7 +306,7 @@ $ grep debuginfo rhel-10.0.z.json | wc -l
 67372
 ```
 
-There are probably other "debug" files that could be removed as well; they're not really useful and they just make these files giant.
+There are probably other "debug" files that could be removed as well; they're not really useful and they just make these files giant.  There are 'debugsource' packages as well.
 
 ## Other TODOs
 
