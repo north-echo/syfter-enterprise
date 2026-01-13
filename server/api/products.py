@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..db import get_db, Product, Scan, Package
+from ..db import get_db, Product, Scan, Package, File
 from .schemas import ProductCreate, ProductResponse
 
 router = APIRouter()
@@ -16,35 +16,30 @@ router = APIRouter()
 
 @router.get("/", response_model=List[ProductResponse])
 def list_products(db: Session = Depends(get_db)):
-    """List all products with scan and package counts."""
-    results = (
-        db.query(
-            Product,
-            func.count(func.distinct(Scan.id)).label("scan_count"),
-            func.count(Package.id).label("total_packages"),
-        )
-        .outerjoin(Scan, Product.id == Scan.product_id)
-        .outerjoin(Package, Product.id == Package.product_id)
-        .group_by(Product.id)
-        .all()
-    )
-
+    """List all products with scan, package, and file counts."""
+    # Get all products first
+    products_list = db.query(Product).order_by(Product.name, Product.version).all()
+    
     products = []
-    for product, scan_count, total_packages in results:
-        product_dict = {
-            "id": product.id,
-            "name": product.name,
-            "version": product.version,
-            "vendor": product.vendor,
-            "cpe_vendor": product.cpe_vendor,
-            "cpe_product": product.cpe_product,
-            "purl_namespace": product.purl_namespace,
-            "description": product.description,
-            "created_at": product.created_at,
-            "scan_count": scan_count or 0,
-            "total_packages": total_packages or 0,
-        }
-        products.append(ProductResponse(**product_dict))
+    for product in products_list:
+        scan_count = db.query(func.count(Scan.id)).filter(Scan.product_id == product.id).scalar() or 0
+        total_packages = db.query(func.count(Package.id)).filter(Package.product_id == product.id).scalar() or 0
+        total_files = db.query(func.count(File.id)).filter(File.product_id == product.id).scalar() or 0
+        
+        products.append(ProductResponse(
+            id=product.id,
+            name=product.name,
+            version=product.version,
+            vendor=product.vendor,
+            cpe_vendor=product.cpe_vendor,
+            cpe_product=product.cpe_product,
+            purl_namespace=product.purl_namespace,
+            description=product.description,
+            created_at=product.created_at,
+            scan_count=scan_count,
+            total_packages=total_packages,
+            total_files=total_files,
+        ))
 
     return products
 
@@ -52,23 +47,19 @@ def list_products(db: Session = Depends(get_db)):
 @router.get("/{product_name}/{product_version}", response_model=ProductResponse)
 def get_product(product_name: str, product_version: str, db: Session = Depends(get_db)):
     """Get a specific product."""
-    result = (
-        db.query(
-            Product,
-            func.count(func.distinct(Scan.id)).label("scan_count"),
-            func.count(Package.id).label("total_packages"),
-        )
-        .outerjoin(Scan, Product.id == Scan.product_id)
-        .outerjoin(Package, Product.id == Package.product_id)
+    product = (
+        db.query(Product)
         .filter(Product.name == product_name, Product.version == product_version)
-        .group_by(Product.id)
         .first()
     )
 
-    if not result:
+    if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    product, scan_count, total_packages = result
+    scan_count = db.query(func.count(Scan.id)).filter(Scan.product_id == product.id).scalar() or 0
+    total_packages = db.query(func.count(Package.id)).filter(Package.product_id == product.id).scalar() or 0
+    total_files = db.query(func.count(File.id)).filter(File.product_id == product.id).scalar() or 0
+
     return ProductResponse(
         id=product.id,
         name=product.name,
@@ -79,8 +70,9 @@ def get_product(product_name: str, product_version: str, db: Session = Depends(g
         purl_namespace=product.purl_namespace,
         description=product.description,
         created_at=product.created_at,
-        scan_count=scan_count or 0,
-        total_packages=total_packages or 0,
+        scan_count=scan_count,
+        total_packages=total_packages,
+        total_files=total_files,
     )
 
 
@@ -121,6 +113,7 @@ def create_product(product: ProductCreate, db: Session = Depends(get_db)):
         created_at=db_product.created_at,
         scan_count=0,
         total_packages=0,
+        total_files=0,
     )
 
 

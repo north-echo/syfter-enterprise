@@ -510,13 +510,16 @@ def list_products(ctx):
     table.add_column("Version", style="green")
     table.add_column("Scans", justify="right")
     table.add_column("Packages", justify="right")
+    table.add_column("Files", justify="right")
 
     for p in products:
+        total_files = p.get("total_files", 0) if isinstance(p, dict) else getattr(p, "total_files", 0)
         table.add_row(
             p["name"] if isinstance(p, dict) else p.name,
             p["version"] if isinstance(p, dict) else p.version,
             str(p.get("scan_count", 0) if isinstance(p, dict) else getattr(p, "scan_count", 0)),
             str(p.get("total_packages", 0) if isinstance(p, dict) else getattr(p, "total_packages", 0)),
+            f"{total_files:,}" if total_files else "0",
         )
     console.print(table)
 

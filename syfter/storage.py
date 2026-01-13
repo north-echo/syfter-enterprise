@@ -494,7 +494,8 @@ class Storage:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT p.*, COUNT(DISTINCT s.id) as scan_count,
-                       SUM(s.package_count) as total_packages
+                       SUM(s.package_count) as total_packages,
+                       SUM(s.file_count) as total_files
                 FROM products p
                 LEFT JOIN scans s ON p.id = s.product_id
                 GROUP BY p.id

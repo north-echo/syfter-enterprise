@@ -35,6 +35,7 @@ class ProductResponse(BaseModel):
     created_at: datetime
     scan_count: int = 0
     total_packages: int = 0
+    total_files: int = 0
 
     class Config:
         from_attributes = True
