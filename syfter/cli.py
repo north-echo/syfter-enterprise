@@ -626,6 +626,93 @@ def list_jobs(ctx, status, product, limit):
         sys.exit(1)
 
 
+@main.command("list")
+@click.option("-p", "--product", required=True, help="Product name")
+@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("-t", "--type", "list_type", 
+              type=click.Choice(["files", "packages"]), 
+              default="files", help="What to list (files or packages)")
+@click.option("--full", is_flag=True, help="Show full package info (name-version-release.arch) instead of just name")
+@click.pass_context
+def list_contents(ctx, product, product_version, list_type, full):
+    """
+    List files or packages for a product version.
+    
+    Outputs a flat list to stdout, one item per line, suitable for 
+    piping to grep, sort, wc, etc.
+    
+    Examples:
+    
+        rh-syfter list -p rhel -v 10.0 -t files > files.txt
+        
+        rh-syfter list -p rhel -v 10.0 -t files | grep libssl
+        
+        rh-syfter list -p rhel -v 10.0 -t packages | wc -l
+        
+        rh-syfter list -p rhel -v 10.0 -t packages --full
+    """
+    if ctx.obj["local_mode"]:
+        _list_local(product, product_version, list_type, full)
+    else:
+        _list_server(ctx, product, product_version, list_type, full)
+
+
+def _list_local(product, product_version, list_type, full):
+    """List using local storage."""
+    from .storage import Storage
+    
+    storage = Storage()
+    
+    if list_type == "files":
+        for path in storage.list_all_files(product, product_version):
+            click.echo(path)
+    else:
+        for pkg in storage.list_all_packages(product, product_version):
+            if full:
+                # Format as name-version.arch (version may already include epoch:ver-release)
+                out = pkg["name"]
+                if pkg.get("version"):
+                    out += f"-{pkg['version']}"
+                if pkg.get("arch"):
+                    out += f".{pkg['arch']}"
+                click.echo(out)
+            else:
+                click.echo(pkg["name"])
+
+
+def _list_server(ctx, product, product_version, list_type, full):
+    """List using server."""
+    from .client import SyfterClient, APIError
+    import httpx
+    
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            if list_type == "files":
+                paths = client.list_all_files(product, product_version)
+                for path in paths:
+                    click.echo(path)
+            else:
+                packages = client.list_all_packages(product, product_version)
+                for pkg in packages:
+                    if full:
+                        # Format as name-version.arch (version may already include epoch:ver-release)
+                        out = pkg["name"]
+                        if pkg.get("version"):
+                            out += f"-{pkg['version']}"
+                        if pkg.get("arch"):
+                            out += f".{pkg['arch']}"
+                        click.echo(out)
+                    else:
+                        click.echo(pkg["name"])
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]List failed: {e}[/red]")
+        sys.exit(1)
+
+
 @main.command("job")
 @click.argument("job_id")
 @click.option("--wait", is_flag=True, help="Wait for job to complete")

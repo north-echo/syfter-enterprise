@@ -558,6 +558,28 @@ class SyfterClient:
         response = self.client.get(self._url("/query/files"), params=params)
         return self._handle_response(response)
 
+    def list_all_packages(
+        self,
+        product_name: str,
+        product_version: str,
+    ) -> list:
+        """List all packages for a product version."""
+        response = self.client.get(
+            self._url(f"/query/list/packages/{product_name}/{product_version}")
+        )
+        return self._handle_response(response)
+
+    def list_all_files(
+        self,
+        product_name: str,
+        product_version: str,
+    ) -> list:
+        """List all file paths for a product version."""
+        response = self.client.get(
+            self._url(f"/query/list/files/{product_name}/{product_version}")
+        )
+        return self._handle_response(response)
+
     # Export operations
     def get_sbom(
         self,

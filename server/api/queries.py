@@ -122,3 +122,53 @@ def get_stats(db: Session = Depends(get_db)):
         storage_type=config.storage.type,
         database_type=config.database.type,
     )
+
+
+@router.get("/list/packages/{product_name}/{product_version}")
+def list_all_packages(
+    product_name: str,
+    product_version: str,
+    db: Session = Depends(get_db),
+):
+    """
+    List all packages for a product version.
+    
+    Returns a simple list suitable for piping to grep, etc.
+    """
+    query = (
+        db.query(Package.name, Package.version, Package.release, Package.arch)
+        .join(Product, Package.product_id == Product.id)
+        .filter(Product.name == product_name, Product.version == product_version)
+        .order_by(Package.name)
+    )
+    
+    return [
+        {
+            "name": name,
+            "version": version,
+            "release": release,
+            "arch": arch,
+        }
+        for name, version, release, arch in query.all()
+    ]
+
+
+@router.get("/list/files/{product_name}/{product_version}")
+def list_all_files(
+    product_name: str,
+    product_version: str,
+    db: Session = Depends(get_db),
+):
+    """
+    List all file paths for a product version.
+    
+    Returns a simple list of file paths suitable for piping to grep, etc.
+    """
+    query = (
+        db.query(File.path)
+        .join(Product, File.product_id == Product.id)
+        .filter(Product.name == product_name, Product.version == product_version)
+        .order_by(File.path)
+    )
+    
+    return [path for (path,) in query.all()]
