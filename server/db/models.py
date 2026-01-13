@@ -51,17 +51,48 @@ class Product(Base):
         return f"{self.name}-{self.version}"
 
 
+class System(Base):
+    """System model - represents a host/server in infrastructure."""
+
+    __tablename__ = "systems"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45))  # IPv6 max length
+    tag: Mapped[Optional[str]] = mapped_column(String(255))  # For CMDB linking, grouping
+    os_name: Mapped[Optional[str]] = mapped_column(String(255))  # e.g., "Red Hat Enterprise Linux"
+    os_version: Mapped[Optional[str]] = mapped_column(String(100))  # e.g., "10.0"
+    arch: Mapped[Optional[str]] = mapped_column(String(50))  # e.g., "x86_64"
+    last_scan_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    scans: Mapped[List["Scan"]] = relationship(back_populates="system", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("idx_system_hostname", "hostname"),
+        Index("idx_system_tag", "tag"),
+        Index("idx_system_ip", "ip_address"),
+    )
+
+
 class Scan(Base):
     """Scan model - represents a single SBOM scan."""
 
     __tablename__ = "scans"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    # Either product_id OR system_id should be set, not both
+    product_id: Mapped[Optional[int]] = mapped_column(ForeignKey("products.id"), nullable=True)
+    system_id: Mapped[Optional[int]] = mapped_column(ForeignKey("systems.id"), nullable=True)
+    
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(String(50), default="directory")
     scan_timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     syft_version: Mapped[Optional[str]] = mapped_column(String(50))
+    
+    # User-provided scan label/version (for systems, defaults to scan date)
+    scan_label: Mapped[Optional[str]] = mapped_column(String(100))
 
     # Storage references (instead of storing blobs)
     original_sbom_key: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -74,11 +105,13 @@ class Scan(Base):
     modified_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
 
     # Relationships
-    product: Mapped["Product"] = relationship(back_populates="scans")
+    product: Mapped[Optional["Product"]] = relationship(back_populates="scans")
+    system: Mapped[Optional["System"]] = relationship(back_populates="scans")
     packages: Mapped[List["Package"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_scan_product", "product_id"),
+        Index("idx_scan_system", "system_id"),
         Index("idx_scan_timestamp", "scan_timestamp"),
     )
 
@@ -90,7 +123,9 @@ class Package(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    # Either product_id OR system_id should be set
+    product_id: Mapped[Optional[int]] = mapped_column(ForeignKey("products.id"), nullable=True)
+    system_id: Mapped[Optional[int]] = mapped_column(ForeignKey("systems.id"), nullable=True)
 
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     version: Mapped[Optional[str]] = mapped_column(String(200))
@@ -109,6 +144,7 @@ class Package(Base):
     __table_args__ = (
         Index("idx_package_name", "name"),
         Index("idx_package_product", "product_id"),
+        Index("idx_package_system", "system_id"),
         Index("idx_package_purl", "purl"),
         Index("idx_package_scan", "scan_id"),
     )
@@ -122,7 +158,9 @@ class File(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     package_id: Mapped[int] = mapped_column(ForeignKey("packages.id", ondelete="CASCADE"), nullable=False)
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
+    # Either product_id OR system_id should be set
+    product_id: Mapped[Optional[int]] = mapped_column(ForeignKey("products.id"), nullable=True)
+    system_id: Mapped[Optional[int]] = mapped_column(ForeignKey("systems.id"), nullable=True)
 
     path: Mapped[str] = mapped_column(String(1000), nullable=False)
     digest: Mapped[Optional[str]] = mapped_column(String(200))
@@ -134,6 +172,7 @@ class File(Base):
     __table_args__ = (
         Index("idx_file_path", "path"),
         Index("idx_file_product", "product_id"),
+        Index("idx_file_system", "system_id"),
         Index("idx_file_digest", "digest"),
         Index("idx_file_scan", "scan_id"),
     )
@@ -146,10 +185,12 @@ class Job(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)  # UUID
     product_id: Mapped[Optional[int]] = mapped_column(ForeignKey("products.id"), nullable=True)
+    system_id: Mapped[Optional[int]] = mapped_column(ForeignKey("systems.id"), nullable=True)
     scan_id: Mapped[Optional[int]] = mapped_column(ForeignKey("scans.id"), nullable=True)
     
+    # Job type: "product_import" or "system_import"
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, processing, complete, failed
-    job_type: Mapped[str] = mapped_column(String(50), default="scan_import")
+    job_type: Mapped[str] = mapped_column(String(50), default="product_import")
     
     # S3 keys for uploaded files
     original_sbom_key: Mapped[Optional[str]] = mapped_column(String(500))
@@ -157,9 +198,17 @@ class Job(Base):
     packages_tsv_key: Mapped[Optional[str]] = mapped_column(String(500))
     files_tsv_key: Mapped[Optional[str]] = mapped_column(String(500))
     
-    # Metadata
-    product_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    product_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Metadata - for products
+    product_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    product_version: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    
+    # Metadata - for systems
+    system_hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    system_ip: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    system_tag: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    scan_label: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    
+    # Common metadata
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(String(50), default="directory")
     syft_version: Mapped[Optional[str]] = mapped_column(String(50))
@@ -181,5 +230,6 @@ class Job(Base):
     __table_args__ = (
         Index("idx_job_status", "status"),
         Index("idx_job_product", "product_id"),
+        Index("idx_job_system", "system_id"),
         Index("idx_job_created", "created_at"),
     )

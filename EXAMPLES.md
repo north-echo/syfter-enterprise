@@ -198,3 +198,129 @@ Converting to cyclonedx-xml...
   output/rhel-10.0.json/rhel-10.0.cdx.xml
 rh-syfter export -p rhel -v 10.0 -f all -o output/  532.54s user 20.74s system 99% cpu 9:14.95 total
 ```
+
+## System Mode (Infrastructure Scanning)
+
+RH-Syfter can also be used to scan and track packages across your infrastructure.
+
+### Scanning the Localhost
+
+Scan the local host and tag it for grouping:
+
+```
+❯ rh-syfter system-scan --tag production
+╭────────────────────────────── RH-Syfter System Scan ──────────────────────────────╮
+│ Scanning: localhost                                                               │
+│ Hostname: webserver01.example.com                                                 │
+│ IP: 192.168.1.50                                                                  │
+│ OS: Linux 6.5.0-14-generic                                                        │
+│ Tag: production                                                                   │
+╰───────────────────────────────────────────────────────────────────────────────────╯
+Scanning localhost (webserver01.example.com)...
+Using syft version: 1.40.0
+...
+✓ System scan #1 uploaded to server (job: abc123...)
+```
+
+### Scanning a Remote Host via SSH
+
+Scan a remote host by providing the hostname or IP:
+
+```
+❯ rh-syfter system-scan git.annvix.ca --tag personal -u vdanen
+Getting info from remote host git.annvix.ca...
+╭─────────────────────────────────────────────────────────────────────────────────────────── RH-Syfter System Scan ───────────────────────────────────────────────────────────────────────────────────────────╮
+│ Scanning: git.annvix.ca                                                                                                                                                                                     │
+│ Hostname: git.annvix.ca                                                                                                                                                                                     │
+│ IP: git.annvix.ca                                                                                                                                                                                           │
+│ OS: Linux 6.18.2-0-virt                                                                                                                                                                                     │
+│ Tag: personal                                                                                                                                                                                               │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Connecting to vdanen@git.annvix.ca...
+Remote syft version: 1.38.0
+Running remote scan on git.annvix.ca...
+Remote scan complete
+Modified 1169 artifacts with product metadata
+Preparing upload: 1169 packages, 27610 files
+Creating system import job...
+Job created: 8de237e7-def4-4444-8aeb-f679ebe94ec7
+Building TSV files...
+TSV built: packages=34.2KB, files=700.3KB
+Compressing SBOMs...
+Uploading files to storage...
+  Uploading original_sbom (2547.6KB)...
+  Uploading modified_sbom (2524.2KB)...
+  Uploading packages_tsv (34.2KB)...
+  Uploading files_tsv (700.3KB)...
+Starting import job...
+Processing in background, polling for status...
+✓ System scan #25 uploaded to server (job: 8de237e7-def4-4444-8aeb-f679ebe94ec7)
+```
+
+### Listing Systems
+
+View all scanned systems:
+
+```
+❯ rh-syfter systems                                            
+                                                   Systems                                                    
+                                                                                                              
+  Hostname         IP               Tag        OS                             Packages    Files   Last Scan   
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────── 
+  git.annvix.ca    192.168.250.22   personal   Linux 6.18.2-0-virt                1169   27,610   2026-01-13  
+  plex.annvix.ca   192.168.250.20   personal   Linux 6.17.9-300.fc43.x86_64       1275   89,296   2026-01-13 
+```
+
+### Querying Packages Across Systems
+
+Find which systems have a specific package installed:
+
+```
+❯ rh-syfter system-query -n 'openssh-server'
+                System Package Search Results                 
+                                                              
+  Name             Version         System           Tag       
+ ──────────────────────────────────────────────────────────── 
+  openssh-server   10.2_p1-r0      git.annvix.ca    personal  
+  openssh-server   10.0p1-6.fc43   plex.annvix.ca   personal     
+```
+
+### Filtering by Tag
+
+Find packages only in personal systems:
+
+```
+❯ rh-syfter system-query -n 'kernel' -t personal                
+              System Package Search Results              
+                                                         
+  Name     Version            System           Tag       
+ ─────────────────────────────────────────────────────── 
+  kernel   6.17.12-300.fc43   plex.annvix.ca   personal  
+  kernel   6.17.8-300.fc43    plex.annvix.ca   personal  
+  kernel   6.17.9-300.fc43    plex.annvix.ca   personal
+```
+
+### Listing Packages for a Specific System
+
+```
+❯ rh-syfter system-list -H plex.annvix.ca -t packages | head -20
+ModemManager-1.24.2-1.fc43
+ModemManager-glib-1.24.2-1.fc43
+NetworkManager-1:1.54.3-2.fc43
+NetworkManager-bluetooth-1:1.54.3-2.fc43
+...
+```
+
+### Finding Files Across Systems
+
+Search for specific files across your infrastructure:
+
+```
+❯ rh-syfter system-query -f '%bin/sshd'
+                         System File Search Results                          
+                                                                             
+  Path             Package                        System           Tag       
+ ─────────────────────────────────────────────────────────────────────────── 
+  /usr/bin/sshd    openssh-server-10.0p1-6.fc43   plex.annvix.ca   personal  
+  /usr/sbin/sshd   openssh-server-10.2_p1-r0      git.annvix.ca    personal  
+```

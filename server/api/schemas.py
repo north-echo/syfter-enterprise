@@ -8,6 +8,38 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+# System schemas (infrastructure mode)
+class SystemCreate(BaseModel):
+    """Schema for creating/updating a system."""
+
+    hostname: str = Field(..., description="System hostname")
+    ip_address: Optional[str] = Field(default=None, description="IP address")
+    tag: Optional[str] = Field(default=None, description="Tag for grouping/CMDB linking")
+    os_name: Optional[str] = Field(default=None, description="OS name (e.g., 'Red Hat Enterprise Linux')")
+    os_version: Optional[str] = Field(default=None, description="OS version (e.g., '10.0')")
+    arch: Optional[str] = Field(default=None, description="Architecture (e.g., 'x86_64')")
+
+
+class SystemResponse(BaseModel):
+    """Schema for system response."""
+
+    id: int
+    hostname: str
+    ip_address: Optional[str]
+    tag: Optional[str]
+    os_name: Optional[str]
+    os_version: Optional[str]
+    arch: Optional[str]
+    last_scan_at: Optional[datetime]
+    created_at: datetime
+    scan_count: int = 0
+    total_packages: int = 0
+    total_files: int = 0
+
+    class Config:
+        from_attributes = True
+
+
 # Product schemas
 class ProductCreate(BaseModel):
     """Schema for creating a product."""
@@ -197,6 +229,7 @@ class StatsResponse(BaseModel):
     """Schema for database statistics."""
 
     products: int
+    systems: int = 0
     scans: int
     packages: int
     files: int
@@ -206,12 +239,26 @@ class StatsResponse(BaseModel):
 
 # Job schemas
 class JobCreate(BaseModel):
-    """Schema for creating an import job."""
+    """Schema for creating a product import job."""
     
     product_name: str = Field(..., description="Product name")
     product_version: str = Field(..., description="Product version")
     source_path: str = Field(..., description="Source path that was scanned")
     source_type: str = Field(default="directory", description="Type of source")
+    syft_version: Optional[str] = Field(default=None, description="Syft version used")
+    total_packages: int = Field(default=0, description="Total package count")
+    total_files: int = Field(default=0, description="Total file count")
+
+
+class SystemJobCreate(BaseModel):
+    """Schema for creating a system import job."""
+    
+    hostname: str = Field(..., description="System hostname")
+    ip_address: Optional[str] = Field(default=None, description="IP address")
+    os_name: Optional[str] = Field(default=None, description="OS name")
+    os_version: Optional[str] = Field(default=None, description="OS version")
+    architecture: Optional[str] = Field(default=None, description="Architecture")
+    tag: Optional[str] = Field(default=None, description="Tag for grouping/CMDB linking")
     syft_version: Optional[str] = Field(default=None, description="Syft version used")
     total_packages: int = Field(default=0, description="Total package count")
     total_files: int = Field(default=0, description="Total file count")
@@ -233,9 +280,16 @@ class JobResponse(BaseModel):
     
     id: str
     status: str  # pending, uploading, processing, complete, failed
-    job_type: str
-    product_name: str
-    product_version: str
+    job_type: str  # product_import, system_import
+    # Product fields (may be None for system imports)
+    product_name: Optional[str] = None
+    product_version: Optional[str] = None
+    # System fields (may be None for product imports)
+    system_hostname: Optional[str] = None
+    system_ip: Optional[str] = None
+    system_tag: Optional[str] = None
+    scan_label: Optional[str] = None
+    # Common fields
     source_path: str
     source_type: str
     syft_version: Optional[str]

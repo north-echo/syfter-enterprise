@@ -386,6 +386,234 @@ def scan_archive(archive_path: Path) -> tuple[dict, str]:
     return scan_target(target)
 
 
+def scan_localhost(
+    show_progress: bool = True,
+    exclude_debug: bool = True,
+) -> tuple[dict, str]:
+    """
+    Scan the local host's installed packages.
+
+    This uses Syft's ability to scan the local filesystem and detect
+    installed packages from package managers (rpm, dpkg, apk, etc.).
+
+    Args:
+        show_progress: Whether to show syft's progress output
+        exclude_debug: Whether to exclude debuginfo/debugsource packages
+
+    Returns:
+        tuple: (SBOM dict, syft version string)
+    """
+    import socket
+    import platform
+    
+    hostname = socket.gethostname()
+    os_info = f"{platform.system()}-{platform.release()}"
+    
+    console.print(f"[dim]Scanning localhost ({hostname})...[/dim]")
+    
+    # Use Syft to scan the root filesystem
+    # The 'dir:/' target scans the root filesystem
+    # On Linux this will pick up RPM, dpkg, apk databases
+    return scan_target(
+        "dir:/",
+        show_progress=show_progress,
+        name=hostname,
+        version=os_info,
+        exclude_debug=exclude_debug,
+    )
+
+
+def scan_remote_host(
+    host: str,
+    user: Optional[str] = None,
+    port: int = 22,
+    identity_file: Optional[str] = None,
+    show_progress: bool = True,
+    exclude_debug: bool = True,
+) -> tuple[dict, str]:
+    """
+    Scan a remote host via SSH.
+
+    This SSHs into the remote host, runs syft there, and retrieves the SBOM.
+    Requires syft to be installed on the remote host.
+
+    Args:
+        host: Remote hostname or IP address
+        user: SSH username (defaults to current user)
+        port: SSH port (default: 22)
+        identity_file: Path to SSH private key
+        show_progress: Whether to show progress output
+        exclude_debug: Whether to exclude debuginfo/debugsource packages
+
+    Returns:
+        tuple: (SBOM dict, syft version string)
+    """
+    import getpass
+    
+    # Build SSH command
+    ssh_user = user or getpass.getuser()
+    ssh_target = f"{ssh_user}@{host}"
+    
+    ssh_opts = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
+    if port != 22:
+        ssh_opts.extend(["-p", str(port)])
+    if identity_file:
+        ssh_opts.extend(["-i", identity_file])
+    
+    console.print(f"[dim]Connecting to {ssh_target}...[/dim]")
+    
+    # First, check if syft is available on remote host
+    check_cmd = ["ssh"] + ssh_opts + [ssh_target, "which syft"]
+    result = subprocess.run(check_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ScanError(
+            f"syft is not installed on {host}. "
+            "Install it from: https://github.com/anchore/syft"
+        )
+    
+    # Get syft version on remote host
+    version_cmd = ["ssh"] + ssh_opts + [ssh_target, "syft version -o json 2>/dev/null || syft version"]
+    result = subprocess.run(version_cmd, capture_output=True, text=True)
+    try:
+        version_info = json.loads(result.stdout)
+        syft_version = version_info.get("version", "unknown")
+    except json.JSONDecodeError:
+        syft_version = result.stdout.strip().split()[-1] if result.stdout else "unknown"
+    
+    console.print(f"[dim]Remote syft version: {syft_version}[/dim]")
+    
+    # Build remote syft command
+    remote_cmd = "syft dir:/ -o syft-json"
+    if exclude_debug:
+        # Syft doesn't have reliable exclude patterns, but we filter in modify_sbom
+        pass
+    
+    console.print(f"[dim]Running remote scan on {host}...[/dim]")
+    
+    # Run syft on remote host and capture output
+    scan_cmd = ["ssh"] + ssh_opts + [ssh_target, remote_cmd]
+    
+    if show_progress:
+        # For remote scans, we can't easily separate stderr/stdout in real-time
+        # Just capture everything
+        result = subprocess.run(scan_cmd, capture_output=True, text=True)
+    else:
+        result = subprocess.run(scan_cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        raise ScanError(f"Remote scan failed on {host}: {result.stderr}")
+    
+    try:
+        sbom = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise ScanError(f"Failed to parse remote syft output: {e}") from e
+    
+    console.print(f"[green]Remote scan complete[/green]")
+    return sbom, syft_version
+
+
+def get_host_info() -> dict:
+    """
+    Get information about the local host.
+
+    Returns:
+        dict: Host information including hostname, IP, OS details
+    """
+    import socket
+    import platform
+    
+    hostname = socket.gethostname()
+    
+    # Try to get primary IP address
+    try:
+        # Connect to a public DNS to get our IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip_address = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip_address = "127.0.0.1"
+    
+    return {
+        "hostname": hostname,
+        "ip_address": ip_address,
+        "os_name": platform.system(),
+        "os_version": platform.release(),
+        "architecture": platform.machine(),
+    }
+
+
+def get_remote_host_info(
+    host: str,
+    user: Optional[str] = None,
+    port: int = 22,
+    identity_file: Optional[str] = None,
+) -> dict:
+    """
+    Get information about a remote host via SSH.
+
+    Args:
+        host: Remote hostname or IP address
+        user: SSH username
+        port: SSH port
+        identity_file: Path to SSH private key
+
+    Returns:
+        dict: Host information
+    """
+    import getpass
+    import socket
+    
+    ssh_user = user or getpass.getuser()
+    ssh_target = f"{ssh_user}@{host}"
+    
+    ssh_opts = ["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
+    if port != 22:
+        ssh_opts.extend(["-p", str(port)])
+    if identity_file:
+        ssh_opts.extend(["-i", identity_file])
+    
+    # Resolve hostname to IP address
+    try:
+        ip_address = socket.gethostbyname(host)
+    except socket.gaierror:
+        ip_address = host  # Fallback to provided host if resolution fails
+    
+    # Get hostname
+    result = subprocess.run(
+        ["ssh"] + ssh_opts + [ssh_target, "hostname"],
+        capture_output=True, text=True
+    )
+    hostname = result.stdout.strip() if result.returncode == 0 else host
+    
+    # Get OS info
+    result = subprocess.run(
+        ["ssh"] + ssh_opts + [ssh_target, "uname -s"],
+        capture_output=True, text=True
+    )
+    os_name = result.stdout.strip() if result.returncode == 0 else "Unknown"
+    
+    result = subprocess.run(
+        ["ssh"] + ssh_opts + [ssh_target, "uname -r"],
+        capture_output=True, text=True
+    )
+    os_version = result.stdout.strip() if result.returncode == 0 else ""
+    
+    result = subprocess.run(
+        ["ssh"] + ssh_opts + [ssh_target, "uname -m"],
+        capture_output=True, text=True
+    )
+    architecture = result.stdout.strip() if result.returncode == 0 else ""
+    
+    return {
+        "hostname": hostname,
+        "ip_address": ip_address,
+        "os_name": os_name,
+        "os_version": os_version,
+        "architecture": architecture,
+    }
+
+
 def get_source_type(target: str) -> str:
     """
     Determine the source type from the target string.

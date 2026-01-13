@@ -25,7 +25,11 @@ from .scanner import (
     scan_directory,
     scan_container,
     scan_target,
+    scan_localhost,
+    scan_remote_host,
     get_source_type,
+    get_host_info,
+    get_remote_host_info,
     check_syft_installed,
     SyftNotFoundError,
     ScanError,
@@ -778,6 +782,354 @@ def job_detail(ctx, job_id, wait, cancel):
         sys.exit(1)
     except APIError as e:
         console.print(f"[red]Job operation failed: {e}[/red]")
+        sys.exit(1)
+
+
+# ============================================================================
+# System commands (infrastructure mode)
+# ============================================================================
+
+@main.command("systems")
+@click.option("--tag", help="Filter by system tag")
+@click.pass_context
+def list_systems(ctx, tag):
+    """List all systems in the database (infrastructure mode)."""
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Systems are only available in server mode[/yellow]")
+        return
+
+    import httpx
+    from .client import SyfterClient
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            systems = client.list_systems(tag=tag)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+
+    if not systems:
+        console.print("[yellow]No systems found[/yellow]")
+        return
+
+    table = Table(title="Systems", box=box.SIMPLE)
+    table.add_column("Hostname", style="cyan")
+    table.add_column("IP", style="dim")
+    table.add_column("Tag", style="magenta")
+    table.add_column("OS", style="green")
+    table.add_column("Packages", justify="right")
+    table.add_column("Files", justify="right")
+    table.add_column("Last Scan", style="dim")
+
+    for s in systems:
+        os_info = ""
+        if s.get("os_name"):
+            os_info = s["os_name"]
+            if s.get("os_version"):
+                os_info += f" {s['os_version']}"
+        
+        last_scan = ""
+        if s.get("last_scan_at"):
+            last_scan = s["last_scan_at"][:10]
+        
+        table.add_row(
+            s["hostname"],
+            s.get("ip_address") or "",
+            s.get("tag") or "",
+            os_info,
+            str(s.get("total_packages", 0)),
+            f"{s.get('total_files', 0):,}" if s.get('total_files') else "0",
+            last_scan,
+        )
+    console.print(table)
+
+
+@main.command("system-query")
+@click.option("-n", "--name", help="Package name pattern (use %% as wildcard)")
+@click.option("-f", "--file", "file_path", help="File path pattern")
+@click.option("-d", "--digest", help="File digest (exact match)")
+@click.option("-H", "--hostname", help="Filter by hostname")
+@click.option("-t", "--tag", help="Filter by system tag")
+@click.option("--limit", type=int, default=50, help="Maximum results")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def system_query(ctx, name, file_path, digest, hostname, tag, limit, output_json):
+    """Query packages and files across systems (infrastructure mode)."""
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]System queries are only available in server mode[/yellow]")
+        return
+
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            if file_path or digest:
+                results = client.search_system_files(
+                    path=file_path, digest=digest,
+                    hostname=hostname, tag=tag, limit=limit
+                )
+                if output_json:
+                    click.echo(json.dumps(results, indent=2))
+                    return
+                if not results:
+                    console.print("[yellow]No files found[/yellow]")
+                    return
+                table = Table(title="System File Search Results", box=box.SIMPLE)
+                table.add_column("Path", style="cyan")
+                table.add_column("Package", style="green")
+                table.add_column("System", style="magenta")
+                table.add_column("Tag", style="dim")
+                for row in results:
+                    pkg_info = row['package_name']
+                    if row.get('package_version'):
+                        pkg_info += f"-{row['package_version']}"
+                    table.add_row(
+                        row["path"], 
+                        pkg_info, 
+                        row["system_hostname"],
+                        row.get("system_tag") or "",
+                    )
+                console.print(table)
+
+            elif name:
+                results = client.search_system_packages(
+                    name=name, hostname=hostname, tag=tag, limit=limit
+                )
+                if output_json:
+                    click.echo(json.dumps(results, indent=2))
+                    return
+                if not results:
+                    console.print("[yellow]No packages found[/yellow]")
+                    return
+                table = Table(title="System Package Search Results", box=box.SIMPLE)
+                table.add_column("Name", style="cyan")
+                table.add_column("Version", style="green")
+                table.add_column("System", style="magenta")
+                table.add_column("Tag", style="dim")
+                for row in results:
+                    table.add_row(
+                        row["name"], 
+                        row["version"] or "", 
+                        row["system_hostname"],
+                        row.get("system_tag") or "",
+                    )
+                console.print(table)
+            else:
+                console.print("[yellow]Please specify --name, --file, or --digest[/yellow]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Query failed: {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("system-list")
+@click.option("-H", "--hostname", required=True, help="System hostname")
+@click.option("-t", "--type", "list_type", 
+              type=click.Choice(["files", "packages"]), 
+              default="files", help="What to list (files or packages)")
+@click.option("--full", is_flag=True, help="Include architecture in package output")
+@click.pass_context
+def system_list_contents(ctx, hostname, list_type, full):
+    """
+    List files or packages for a system (infrastructure mode).
+    
+    Outputs a flat list to stdout, one item per line, suitable for 
+    piping to grep, sort, wc, etc.
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]System list is only available in server mode[/yellow]")
+        return
+
+    from .client import SyfterClient, APIError
+    import httpx
+    
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            if list_type == "files":
+                paths = client.list_system_files(hostname)
+                for path in paths:
+                    click.echo(path)
+            else:
+                packages = client.list_system_packages(hostname)
+                for pkg in packages:
+                    # Default: name-version, --full adds .arch
+                    out = pkg["name"]
+                    if pkg.get("version"):
+                        out += f"-{pkg['version']}"
+                    if full and pkg.get("arch"):
+                        out += f".{pkg['arch']}"
+                    click.echo(out)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]List failed: {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("system-scan")
+@click.argument("target", default="localhost")
+@click.option("-t", "--tag", help="System tag for grouping/filtering (e.g., 'production', 'web-servers')")
+@click.option("-u", "--user", help="SSH user for remote hosts")
+@click.option("-p", "--port", type=int, default=22, help="SSH port for remote hosts")
+@click.option("-i", "--identity", type=click.Path(exists=True), help="SSH identity file")
+@click.option("-o", "--output", type=click.Path(path_type=Path), help="Write SBOM to file")
+@click.option("--no-store", is_flag=True, help="Don't store (just output)")
+@click.option("-q", "--quiet", is_flag=True, help="Suppress progress output")
+@click.option("--skip-files", is_flag=True, help="Skip file indexing (faster, uses less memory)")
+@click.option("--include-debug", is_flag=True, help="Include debuginfo/debugsource packages")
+@click.pass_context
+def system_scan(
+    ctx,
+    target: str,
+    tag: Optional[str],
+    user: Optional[str],
+    port: int,
+    identity: Optional[str],
+    output: Optional[Path],
+    no_store: bool,
+    quiet: bool,
+    skip_files: bool,
+    include_debug: bool,
+):
+    """
+    Scan a system and store the SBOM for infrastructure tracking.
+    
+    TARGET can be 'localhost' (default) or a remote hostname/IP for SSH scanning.
+    
+    Examples:
+    
+        # Scan the local system
+        rh-syfter system-scan
+        
+        # Scan with a tag for grouping
+        rh-syfter system-scan --tag production
+        
+        # Scan a remote host via SSH
+        rh-syfter system-scan webserver01.example.com
+        
+        # Scan remote host with specific SSH options
+        rh-syfter system-scan 192.168.1.100 -u admin -i ~/.ssh/server_key
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]System scanning requires server mode. Set SYFTER_SERVER environment variable.[/yellow]")
+        sys.exit(1)
+    
+    try:
+        check_syft_installed()
+    except SyftNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        sys.exit(1)
+    
+    # Determine if scanning localhost or remote
+    is_localhost = target.lower() in ("localhost", "127.0.0.1", "::1")
+    
+    # Get host info
+    if is_localhost:
+        host_info = get_host_info()
+    else:
+        console.print(f"[dim]Getting info from remote host {target}...[/dim]")
+        try:
+            host_info = get_remote_host_info(target, user=user, port=port, identity_file=identity)
+        except Exception as e:
+            console.print(f"[red]Failed to connect to {target}: {e}[/red]")
+            sys.exit(1)
+    
+    if tag:
+        host_info["tag"] = tag
+    
+    console.print(Panel(
+        f"[bold]Scanning:[/bold] {target}\n"
+        f"[bold]Hostname:[/bold] {host_info['hostname']}\n"
+        f"[bold]IP:[/bold] {host_info.get('ip_address', 'unknown')}\n"
+        f"[bold]OS:[/bold] {host_info.get('os_name', '')} {host_info.get('os_version', '')}\n"
+        f"[bold]Tag:[/bold] {tag or '(none)'}",
+        title="RH-Syfter System Scan",
+        box=box.ROUNDED,
+    ))
+    
+    try:
+        exclude_debug = not include_debug
+        if is_localhost:
+            original_sbom, syft_version = scan_localhost(
+                show_progress=not quiet,
+                exclude_debug=exclude_debug,
+            )
+        else:
+            original_sbom, syft_version = scan_remote_host(
+                host=target,
+                user=user,
+                port=port,
+                identity_file=identity,
+                show_progress=not quiet,
+                exclude_debug=exclude_debug,
+            )
+    except ScanError as e:
+        console.print(f"[red]Scan failed: {e}[/red]")
+        sys.exit(1)
+    
+    # Create a pseudo-product for modification (reuse existing infrastructure)
+    from .models import Product
+    pseudo_product = Product(
+        name=host_info["hostname"],
+        version=host_info.get("os_version", "unknown"),
+        vendor="",
+        cpe_vendor="",
+        purl_namespace="",
+        description=f"System scan of {host_info['hostname']}",
+    )
+    
+    modified_sbom = modify_sbom(original_sbom, pseudo_product, exclude_debug=not include_debug)
+    packages = extract_packages(modified_sbom, skip_files=skip_files)
+    
+    if skip_files:
+        console.print("[yellow]Note: File indexing skipped (--skip-files). File search won't work for this scan.[/yellow]")
+    
+    if output:
+        output.write_text(json.dumps(modified_sbom, indent=2))
+        console.print(f"[green]Wrote SBOM to {output}[/green]")
+    
+    if no_store:
+        console.print("[yellow]Skipped storage (--no-store)[/yellow]")
+        return
+    
+    # Store to server
+    _store_system_server(ctx, host_info, syft_version, original_sbom, modified_sbom, packages)
+
+
+def _store_system_server(ctx, host_info, syft_version, original_sbom, modified_sbom, packages):
+    """Store system scan using API server with async job-based flow."""
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            # Use async job-based upload for memory efficiency
+            result = client.upload_system_scan_async(
+                hostname=host_info["hostname"],
+                ip_address=host_info.get("ip_address"),
+                os_name=host_info.get("os_name"),
+                os_version=host_info.get("os_version"),
+                architecture=host_info.get("architecture"),
+                tag=host_info.get("tag"),
+                syft_version=syft_version,
+                original_sbom=original_sbom,
+                modified_sbom=modified_sbom,
+                packages=packages,
+            )
+            scan_id = result.get("scan_id", "unknown")
+            console.print(f"[green]✓ System scan #{scan_id} uploaded to server (job: {result['id']})[/green]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Upload failed: {e}[/red]")
         sys.exit(1)
 
 
