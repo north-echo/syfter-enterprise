@@ -227,20 +227,34 @@ Using syft version: 1.40.0
 Scan a remote host by providing the hostname or IP:
 
 ```
-❯ rh-syfter system-scan dbserver.internal --tag databases -u admin
-╭────────────────────────────── RH-Syfter System Scan ──────────────────────────────╮
-│ Scanning: dbserver.internal                                                       │
-│ Hostname: dbserver.internal                                                       │
-│ IP: dbserver.internal                                                             │
-│ OS: Linux 5.14.0-284.el9.x86_64                                                   │
-│ Tag: databases                                                                    │
-╰───────────────────────────────────────────────────────────────────────────────────╯
-Connecting to admin@dbserver.internal...
-Remote syft version: 1.40.0
-Running remote scan on dbserver.internal...
+❯ rh-syfter system-scan git.annvix.ca --tag personal -u vdanen
+Getting info from remote host git.annvix.ca...
+╭─────────────────────────────────────────────────────────────────────────────────────────── RH-Syfter System Scan ───────────────────────────────────────────────────────────────────────────────────────────╮
+│ Scanning: git.annvix.ca                                                                                                                                                                                     │
+│ Hostname: git.annvix.ca                                                                                                                                                                                     │
+│ IP: git.annvix.ca                                                                                                                                                                                           │
+│ OS: Linux 6.18.2-0-virt                                                                                                                                                                                     │
+│ Tag: personal                                                                                                                                                                                               │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Connecting to vdanen@git.annvix.ca...
+Remote syft version: 1.38.0
+Running remote scan on git.annvix.ca...
 Remote scan complete
-...
-✓ System scan #2 uploaded to server (job: def456...)
+Modified 1169 artifacts with product metadata
+Preparing upload: 1169 packages, 27610 files
+Creating system import job...
+Job created: 8de237e7-def4-4444-8aeb-f679ebe94ec7
+Building TSV files...
+TSV built: packages=34.2KB, files=700.3KB
+Compressing SBOMs...
+Uploading files to storage...
+  Uploading original_sbom (2547.6KB)...
+  Uploading modified_sbom (2524.2KB)...
+  Uploading packages_tsv (34.2KB)...
+  Uploading files_tsv (700.3KB)...
+Starting import job...
+Processing in background, polling for status...
+✓ System scan #25 uploaded to server (job: 8de237e7-def4-4444-8aeb-f679ebe94ec7)
 ```
 
 ### Listing Systems
@@ -248,14 +262,13 @@ Remote scan complete
 View all scanned systems:
 
 ```
-❯ rh-syfter systems
-                                      Systems                                       
-                                                                                    
-  Hostname                 IP              Tag          OS                 Packages  Files      Last Scan  
- ───────────────────────────────────────────────────────────────────────────────────────────────────────── 
-  webserver01.example.com  192.168.1.50    production   Linux 6.5.0-14     1,234     45,678     2024-01-15 
-  dbserver.internal        10.0.0.25       databases    Linux 5.14.0-284   987       32,100     2024-01-15 
-  buildhost.corp           10.0.0.100      build        Linux 6.8.0-31     2,345     89,012     2024-01-14 
+❯ rh-syfter systems                                            
+                                                   Systems                                                    
+                                                                                                              
+  Hostname         IP               Tag        OS                             Packages    Files   Last Scan   
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────── 
+  git.annvix.ca    192.168.250.22   personal   Linux 6.18.2-0-virt                1169   27,610   2026-01-13  
+  plex.annvix.ca   192.168.250.20   personal   Linux 6.17.9-300.fc43.x86_64       1275   89,296   2026-01-13 
 ```
 
 ### Querying Packages Across Systems
@@ -263,43 +276,38 @@ View all scanned systems:
 Find which systems have a specific package installed:
 
 ```
-❯ rh-syfter system-query -n "openssh%"
-                       System Package Search Results                        
-                                                                             
-  Name            Version              System                   Tag          
- ─────────────────────────────────────────────────────────────────────────── 
-  openssh         8.7p1-34.el9         webserver01.example.com  production   
-  openssh-server  8.7p1-34.el9         webserver01.example.com  production   
-  openssh-clients 8.7p1-34.el9         webserver01.example.com  production   
-  openssh         9.0p1-10.el10        buildhost.corp           build        
-  openssh-server  9.0p1-10.el10        buildhost.corp           build        
+❯ rh-syfter system-query -n 'openssh-server'
+                System Package Search Results                 
+                                                              
+  Name             Version         System           Tag       
+ ──────────────────────────────────────────────────────────── 
+  openssh-server   10.2_p1-r0      git.annvix.ca    personal  
+  openssh-server   10.0p1-6.fc43   plex.annvix.ca   personal     
 ```
 
 ### Filtering by Tag
 
-Find packages only in production systems:
+Find packages only in personal systems:
 
 ```
-❯ rh-syfter system-query -n "kernel%" --tag production
-                       System Package Search Results                        
-                                                                             
-  Name                   Version              System                   Tag          
- ──────────────────────────────────────────────────────────────────────────────────
-  kernel                 6.5.0-14.generic     webserver01.example.com  production   
-  kernel-core            6.5.0-14.generic     webserver01.example.com  production   
+❯ rh-syfter system-query -n 'kernel' -t personal                
+              System Package Search Results              
+                                                         
+  Name     Version            System           Tag       
+ ─────────────────────────────────────────────────────── 
+  kernel   6.17.12-300.fc43   plex.annvix.ca   personal  
+  kernel   6.17.8-300.fc43    plex.annvix.ca   personal  
+  kernel   6.17.9-300.fc43    plex.annvix.ca   personal
 ```
 
 ### Listing Packages for a Specific System
 
 ```
-❯ rh-syfter system-list -H webserver01.example.com -t packages | head -20
-NetworkManager-1.42.2-5.el9
-NetworkManager-libnm-1.42.2-5.el9
-acl-2.3.1-4.el9
-audit-libs-3.0.7-104.el9
-basesystem-11-13.el9
-bash-5.1.8-9.el9
-bind-libs-9.16.23-14.el9
+❯ rh-syfter system-list -H plex.annvix.ca -t packages | head -20
+ModemManager-1.24.2-1.fc43
+ModemManager-glib-1.24.2-1.fc43
+NetworkManager-1:1.54.3-2.fc43
+NetworkManager-bluetooth-1:1.54.3-2.fc43
 ...
 ```
 
@@ -308,11 +316,11 @@ bind-libs-9.16.23-14.el9
 Search for specific files across your infrastructure:
 
 ```
-❯ rh-syfter system-query -f "%/sbin/sshd"
-                       System File Search Results                        
-                                                                          
-  Path            Package                   System                   Tag  
- ──────────────────────────────────────────────────────────────────────── 
-  /usr/sbin/sshd  openssh-server-8.7p1-34   webserver01.example.com  production 
-  /usr/sbin/sshd  openssh-server-9.0p1-10   buildhost.corp           build      
+❯ rh-syfter system-query -f '%bin/sshd'
+                         System File Search Results                          
+                                                                             
+  Path             Package                        System           Tag       
+ ─────────────────────────────────────────────────────────────────────────── 
+  /usr/bin/sshd    openssh-server-10.0p1-6.fc43   plex.annvix.ca   personal  
+  /usr/sbin/sshd   openssh-server-10.2_p1-r0      git.annvix.ca    personal  
 ```
