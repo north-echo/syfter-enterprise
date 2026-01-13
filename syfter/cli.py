@@ -277,7 +277,10 @@ def _query_local(name, file_path, digest, product, product_version, limit, outpu
         table.add_column("Package", style="green")
         table.add_column("Product", style="magenta")
         for row in results:
-            table.add_row(row["path"], f"{row['package_name']}", f"{row['product_name']}-{row['product_version']}")
+            pkg_info = row['package_name']
+            if row.get('package_version'):
+                pkg_info += f"-{row['package_version']}"
+            table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
         console.print(table)
 
     elif name:
@@ -325,7 +328,10 @@ def _query_server(ctx, name, file_path, digest, product, product_version, limit,
                 table.add_column("Package", style="green")
                 table.add_column("Product", style="magenta")
                 for row in results:
-                    table.add_row(row["path"], row["package_name"], f"{row['product_name']}-{row['product_version']}")
+                    pkg_info = row['package_name']
+                    if row.get('package_version'):
+                        pkg_info += f"-{row['package_version']}"
+                    table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
                 console.print(table)
 
             elif name:
