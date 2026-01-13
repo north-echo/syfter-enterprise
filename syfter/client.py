@@ -580,6 +580,223 @@ class SyfterClient:
         )
         return self._handle_response(response)
 
+    # ========================================================================
+    # System operations (infrastructure mode)
+    # ========================================================================
+    
+    def list_systems(self, tag: Optional[str] = None) -> list:
+        """List all systems."""
+        params = {}
+        if tag:
+            params["tag"] = tag
+        response = self.client.get(self._url("/systems/"), params=params)
+        return self._handle_response(response)
+
+    def get_system(self, hostname: str) -> dict:
+        """Get a specific system."""
+        response = self.client.get(self._url(f"/systems/{hostname}"))
+        return self._handle_response(response)
+
+    def search_system_packages(
+        self,
+        name: Optional[str] = None,
+        hostname: Optional[str] = None,
+        tag: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
+        """Search for packages across systems."""
+        params = {"limit": limit}
+        if name:
+            params["name"] = name
+        if hostname:
+            params["hostname"] = hostname
+        if tag:
+            params["tag"] = tag
+
+        response = self.client.get(self._url("/query/systems/packages"), params=params)
+        return self._handle_response(response)
+
+    def search_system_files(
+        self,
+        path: Optional[str] = None,
+        digest: Optional[str] = None,
+        hostname: Optional[str] = None,
+        tag: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
+        """Search for files across systems."""
+        params = {"limit": limit}
+        if path:
+            params["path"] = path
+        if digest:
+            params["digest"] = digest
+        if hostname:
+            params["hostname"] = hostname
+        if tag:
+            params["tag"] = tag
+
+        response = self.client.get(self._url("/query/systems/files"), params=params)
+        return self._handle_response(response)
+
+    def list_system_packages(self, hostname: str) -> list:
+        """List all packages for a system."""
+        response = self.client.get(
+            self._url(f"/query/systems/list/packages/{hostname}")
+        )
+        return self._handle_response(response)
+
+    def list_system_files(self, hostname: str) -> list:
+        """List all file paths for a system."""
+        response = self.client.get(
+            self._url(f"/query/systems/list/files/{hostname}")
+        )
+        return self._handle_response(response)
+
+    def upload_system_scan_async(
+        self,
+        hostname: str,
+        ip_address: Optional[str],
+        os_name: Optional[str],
+        os_version: Optional[str],
+        architecture: Optional[str],
+        tag: Optional[str],
+        syft_version: str,
+        original_sbom: dict,
+        modified_sbom: dict,
+        packages: list,
+        poll_interval: float = 5.0,
+    ) -> dict:
+        """
+        Upload a system scan using the async job-based flow.
+        
+        This method:
+        1. Creates a job and gets presigned upload URLs
+        2. Builds TSV files from packages
+        3. Uploads SBOMs and TSV files to S3
+        4. Starts the job
+        5. Polls for completion
+        
+        Args:
+            hostname: System hostname
+            ip_address: System IP address
+            os_name: Operating system name
+            os_version: Operating system version
+            architecture: System architecture
+            tag: Optional tag for grouping
+            syft_version: Version of syft used
+            original_sbom: Original syft-json SBOM dict
+            modified_sbom: Modified SBOM dict
+            packages: List of package dicts for indexing
+            poll_interval: Seconds between status polls
+            
+        Returns:
+            dict: Job response with scan_id when complete
+        """
+        import tempfile
+        
+        # Count files
+        total_files = sum(len(pkg.get("files", [])) for pkg in packages)
+        total_packages = len(packages)
+        
+        console.print(f"[dim]Preparing upload: {total_packages} packages, {total_files} files[/dim]")
+        
+        # Step 1: Create job for system
+        console.print("[dim]Creating system import job...[/dim]")
+        job_response = self.create_system_job(
+            hostname=hostname,
+            ip_address=ip_address,
+            os_name=os_name,
+            os_version=os_version,
+            architecture=architecture,
+            tag=tag,
+            syft_version=syft_version,
+            total_packages=total_packages,
+            total_files=total_files,
+        )
+        job_id = job_response["job_id"]
+        console.print(f"[dim]Job created: {job_id}[/dim]")
+        
+        # Step 2: Build TSV files
+        console.print("[dim]Building TSV files...[/dim]")
+        packages_tsv_gz, files_tsv_gz, pkg_count, file_count = build_tsv_files(packages)
+        console.print(
+            f"[dim]TSV built: packages={len(packages_tsv_gz)/1024:.1f}KB, "
+            f"files={len(files_tsv_gz)/1024:.1f}KB[/dim]"
+        )
+        
+        # Step 3: Upload files to presigned URLs
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            
+            # Write compressed SBOMs
+            original_path = tmpdir / "original.json.gz"
+            modified_path = tmpdir / "modified.json.gz"
+            packages_path = tmpdir / "packages.tsv.gz"
+            files_path = tmpdir / "files.tsv.gz"
+            
+            console.print("[dim]Compressing SBOMs...[/dim]")
+            with gzip.open(original_path, 'wt', encoding='utf-8') as f:
+                json.dump(original_sbom, f)
+            with gzip.open(modified_path, 'wt', encoding='utf-8') as f:
+                json.dump(modified_sbom, f)
+            
+            packages_path.write_bytes(packages_tsv_gz)
+            if files_tsv_gz:
+                files_path.write_bytes(files_tsv_gz)
+            
+            console.print("[dim]Uploading files to storage...[/dim]")
+            
+            # Upload each file to its presigned URL
+            uploads = [
+                ("original_sbom", original_path, job_response["original_sbom_url"]),
+                ("modified_sbom", modified_path, job_response["modified_sbom_url"]),
+                ("packages_tsv", packages_path, job_response["packages_tsv_url"]),
+            ]
+            if files_tsv_gz:
+                uploads.append(("files_tsv", files_path, job_response["files_tsv_url"]))
+            
+            for name, path, url in uploads:
+                size_kb = path.stat().st_size / 1024
+                console.print(f"[dim]  Uploading {name} ({size_kb:.1f}KB)...[/dim]")
+                self._upload_to_presigned_url(url, path)
+        
+        # Step 4: Start the job
+        console.print("[dim]Starting import job...[/dim]")
+        job_status = self.start_job(job_id)
+        
+        # Step 5: Poll for completion
+        console.print("[dim]Processing in background, polling for status...[/dim]")
+        return self.wait_for_job(job_id, poll_interval=poll_interval)
+
+    def create_system_job(
+        self,
+        hostname: str,
+        ip_address: Optional[str],
+        os_name: Optional[str],
+        os_version: Optional[str],
+        architecture: Optional[str],
+        tag: Optional[str],
+        syft_version: Optional[str],
+        total_packages: int,
+        total_files: int,
+    ) -> dict:
+        """Create a new import job for a system scan."""
+        response = self.client.post(
+            self._url("/jobs/system"),
+            json={
+                "hostname": hostname,
+                "ip_address": ip_address,
+                "os_name": os_name,
+                "os_version": os_version,
+                "architecture": architecture,
+                "tag": tag,
+                "syft_version": syft_version or "",
+                "total_packages": total_packages,
+                "total_files": total_files,
+            },
+        )
+        return self._handle_response(response)
+
     # Export operations
     def get_sbom(
         self,

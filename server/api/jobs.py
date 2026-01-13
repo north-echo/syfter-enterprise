@@ -12,11 +12,12 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from server.db.session import get_db
-from server.db.models import Job, Product, Scan, Package, File
+from server.db.models import Job, Product, System, Scan, Package, File
 from server.storage.base import get_storage
 from server.config import get_config
 from server.api.schemas import (
     JobCreate,
+    SystemJobCreate,
     JobUploadUrls,
     JobResponse,
     JobListResponse,
@@ -32,7 +33,7 @@ async def create_job(
     db: Session = Depends(get_db),
 ):
     """
-    Create a new import job and get presigned URLs for file uploads.
+    Create a new product import job and get presigned URLs for file uploads.
     
     Flow:
     1. Client calls this to create a job and get upload URLs
@@ -52,7 +53,7 @@ async def create_job(
     job = Job(
         id=job_id,
         status="pending",
-        job_type="scan_import",
+        job_type="product_import",
         product_name=job_data.product_name,
         product_version=job_data.product_version,
         source_path=job_data.source_path,
@@ -65,6 +66,76 @@ async def create_job(
         packages_tsv_key=packages_tsv_key,
         files_tsv_key=files_tsv_key,
     )
+    
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    
+    # Get presigned upload URLs
+    storage = get_storage()
+    
+    return JobUploadUrls(
+        job_id=job_id,
+        original_sbom_url=storage.get_presigned_upload_url(original_sbom_key),
+        modified_sbom_url=storage.get_presigned_upload_url(modified_sbom_key),
+        packages_tsv_url=storage.get_presigned_upload_url(packages_tsv_key),
+        files_tsv_url=storage.get_presigned_upload_url(files_tsv_key),
+        expires_in=3600,
+    )
+
+
+@router.post("/system", response_model=JobUploadUrls)
+async def create_system_job(
+    job_data: SystemJobCreate,
+    db: Session = Depends(get_db),
+):
+    """
+    Create a new system import job and get presigned URLs for file uploads.
+    
+    This is for infrastructure mode - scanning hosts instead of products.
+    
+    Flow:
+    1. Client calls this to create a job and get upload URLs
+    2. Client uploads files to the presigned URLs
+    3. Client calls POST /jobs/{job_id}/start to begin processing
+    """
+    job_id = str(uuid.uuid4())
+    
+    # Create storage keys
+    base_key = f"jobs/{job_id}"
+    original_sbom_key = f"{base_key}/original_sbom.json.gz"
+    modified_sbom_key = f"{base_key}/modified_sbom.json.gz"
+    packages_tsv_key = f"{base_key}/packages.tsv.gz"
+    files_tsv_key = f"{base_key}/files.tsv.gz"
+    
+    # Create job record for system import
+    job = Job(
+        id=job_id,
+        status="pending",
+        job_type="system_import",
+        system_hostname=job_data.hostname,
+        system_ip=job_data.ip_address,
+        system_tag=job_data.tag,
+        # Store OS info in source_path for now (it will be applied to system record later)
+        source_path=f"host:{job_data.hostname}",
+        source_type="host",
+        syft_version=job_data.syft_version,
+        total_packages=job_data.total_packages,
+        total_files=job_data.total_files,
+        original_sbom_key=original_sbom_key,
+        modified_sbom_key=modified_sbom_key,
+        packages_tsv_key=packages_tsv_key,
+        files_tsv_key=files_tsv_key,
+    )
+    
+    # Store additional OS info as scan_label temporarily
+    # Format: os_name|os_version|architecture
+    os_parts = [
+        job_data.os_name or "",
+        job_data.os_version or "",
+        job_data.architecture or "",
+    ]
+    job.scan_label = "|".join(os_parts)
     
     db.add(job)
     db.commit()
@@ -214,6 +285,10 @@ def _job_to_response(job: Job) -> JobResponse:
         job_type=job.job_type,
         product_name=job.product_name,
         product_version=job.product_version,
+        system_hostname=job.system_hostname,
+        system_ip=job.system_ip,
+        system_tag=job.system_tag,
+        scan_label=job.scan_label,
         source_path=job.source_path,
         source_type=job.source_type,
         syft_version=job.syft_version,
@@ -229,11 +304,77 @@ def _job_to_response(job: Job) -> JobResponse:
     )
 
 
+def _get_or_create_product(db: Session, job: Job) -> Product:
+    """Get or create product for a job."""
+    product = db.query(Product).filter(
+        Product.name == job.product_name,
+        Product.version == job.product_version
+    ).first()
+    
+    if not product:
+        product = Product(
+            name=job.product_name,
+            version=job.product_version,
+        )
+        db.add(product)
+        db.commit()
+        db.refresh(product)
+    
+    return product
+
+
+def _get_or_create_system(db: Session, job: Job) -> System:
+    """Get or create system for a job."""
+    # Parse OS info from scan_label (format: os_name|os_version|architecture)
+    os_name = None
+    os_version = None
+    architecture = None
+    if job.scan_label and "|" in job.scan_label:
+        parts = job.scan_label.split("|")
+        os_name = parts[0] if len(parts) > 0 and parts[0] else None
+        os_version = parts[1] if len(parts) > 1 and parts[1] else None
+        architecture = parts[2] if len(parts) > 2 and parts[2] else None
+    
+    system = db.query(System).filter(
+        System.hostname == job.system_hostname
+    ).first()
+    
+    if not system:
+        system = System(
+            hostname=job.system_hostname,
+            ip_address=job.system_ip,
+            tag=job.system_tag,
+            os_name=os_name,
+            os_version=os_version,
+            arch=architecture,
+        )
+        db.add(system)
+        db.commit()
+        db.refresh(system)
+    else:
+        # Update system info if provided
+        if job.system_ip:
+            system.ip_address = job.system_ip
+        if job.system_tag:
+            system.tag = job.system_tag
+        if os_name:
+            system.os_name = os_name
+        if os_version:
+            system.os_version = os_version
+        if architecture:
+            system.arch = architecture
+        db.commit()
+        db.refresh(system)
+    
+    return system
+
+
 def process_job(job_id: str):
     """
     Background task to process an import job.
     
     This runs PostgreSQL COPY commands directly from the TSV files.
+    Handles both product imports and system imports.
     """
     from server.db.session import get_session_factory
     
@@ -245,33 +386,39 @@ def process_job(job_id: str):
             logger.error(f"Job {job_id} not found")
             return
         
-        logger.info(f"Processing job {job_id}: {job.product_name}-{job.product_version}")
-        
         storage = get_storage()
         config = get_config()
         
-        # Get or create product
-        product = db.query(Product).filter(
-            Product.name == job.product_name,
-            Product.version == job.product_version
-        ).first()
+        # Determine if this is a product or system import
+        is_system_import = job.job_type == "system_import"
         
-        if not product:
-            product = Product(
-                name=job.product_name,
-                version=job.product_version,
-            )
-            db.add(product)
-            db.commit()
-            db.refresh(product)
+        if is_system_import:
+            logger.info(f"Processing system job {job_id}: {job.system_hostname}")
+            product = None
+            system = _get_or_create_system(db, job)
+            job.system_id = system.id
+            entity_id = system.id
+            entity_type = "system"
+        else:
+            logger.info(f"Processing product job {job_id}: {job.product_name}-{job.product_version}")
+            system = None
+            product = _get_or_create_product(db, job)
+            job.product_id = product.id
+            entity_id = product.id
+            entity_type = "product"
         
-        job.product_id = product.id
         db.commit()
         
-        # Delete existing scans for this product
-        existing_scans = db.query(Scan).filter(Scan.product_id == product.id).all()
+        # Delete existing scans for this product/system
+        if is_system_import:
+            existing_scans = db.query(Scan).filter(Scan.system_id == system.id).all()
+            entity_name = system.hostname
+        else:
+            existing_scans = db.query(Scan).filter(Scan.product_id == product.id).all()
+            entity_name = product.full_name
+        
         if existing_scans:
-            logger.info(f"Deleting {len(existing_scans)} existing scan(s) for {product.full_name}")
+            logger.info(f"Deleting {len(existing_scans)} existing scan(s) for {entity_name}")
             
             # Use a separate raw connection for deletions to avoid session conflicts
             from server.db.session import get_engine
@@ -335,7 +482,10 @@ def process_job(job_id: str):
             db.expire_all()
         
         # Move SBOMs to permanent location
-        scan_base = f"scans/{product.id}"
+        if is_system_import:
+            scan_base = f"systems/{system.id}/scans"
+        else:
+            scan_base = f"scans/{product.id}"
         final_original_key = f"{scan_base}/original_sbom.json.gz"
         final_modified_key = f"{scan_base}/modified_sbom.json.gz"
         
@@ -349,7 +499,8 @@ def process_job(job_id: str):
         
         # Create scan record
         scan = Scan(
-            product_id=product.id,
+            product_id=product.id if product else None,
+            system_id=system.id if system else None,
             source_path=job.source_path,
             source_type=job.source_type,
             syft_version=job.syft_version,
@@ -367,6 +518,11 @@ def process_job(job_id: str):
         job.scan_id = scan.id
         db.commit()
         
+        # Update system last_scan_at if this is a system import
+        if is_system_import and system:
+            system.last_scan_at = datetime.utcnow()
+            db.commit()
+        
         logger.info(f"Created scan {scan.id}, importing packages...")
         
         # Import packages and files from TSV
@@ -379,12 +535,12 @@ def process_job(job_id: str):
             # Get a raw psycopg2 connection for COPY operations
             import_conn = engine.raw_connection()
             try:
-                _import_tsv_postgres(db, import_conn, storage, job, scan, product)
+                _import_tsv_postgres(db, import_conn, storage, job, scan, product, system)
             finally:
                 import_conn.close()
         else:
             raw_conn = db.connection().connection.dbapi_connection
-            _import_tsv_sqlite(db, raw_conn, storage, job, scan, product)
+            _import_tsv_sqlite(db, raw_conn, storage, job, scan, product, system)
         
         # Update job as complete
         job.status = "complete"
@@ -419,7 +575,7 @@ def process_job(job_id: str):
         db.close()
 
 
-def _import_tsv_postgres(db, raw_conn, storage, job, scan, product):
+def _import_tsv_postgres(db, raw_conn, storage, job, scan, product, system):
     """Import TSV files directly into PostgreSQL using COPY."""
     import gzip
     import tempfile
@@ -427,20 +583,24 @@ def _import_tsv_postgres(db, raw_conn, storage, job, scan, product):
     
     cursor = raw_conn.cursor()
     
+    # Determine if this is a product or system import
+    product_id = product.id if product else "\\N"
+    system_id = system.id if system else "\\N"
+    
     # Download and decompress packages TSV
     logger.info("Downloading packages TSV...")
     packages_data = storage.get(job.packages_tsv_key)
     packages_tsv = gzip.decompress(packages_data).decode('utf-8')
     
-    # Write to temp file with scan_id and product_id prepended
+    # Write to temp file with scan_id, product_id, and system_id prepended
     logger.info("Preparing packages for COPY...")
     with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
         pkg_tmp_path = f.name
         pkg_count = 0
         for line in packages_tsv.strip().split('\n'):
             if line:
-                # Prepend scan_id and product_id
-                f.write(f"{scan.id}\t{product.id}\t{line}\n")
+                # Prepend scan_id, product_id, system_id
+                f.write(f"{scan.id}\t{product_id}\t{system_id}\t{line}\n")
                 pkg_count += 1
     
     del packages_tsv
@@ -451,7 +611,7 @@ def _import_tsv_postgres(db, raw_conn, storage, job, scan, product):
         cursor.copy_from(
             f,
             'packages',
-            columns=('scan_id', 'product_id', 'name', 'version', 'release', 
+            columns=('scan_id', 'product_id', 'system_id', 'name', 'version', 'release', 
                      'arch', 'epoch', 'source_rpm', 'license', 'purl', 'cpes'),
             null='\\N'
         )
@@ -492,8 +652,8 @@ def _import_tsv_postgres(db, raw_conn, storage, job, scan, product):
                           parts[2] if parts[2] != '\\N' else None)
                 pkg_id = pkg_id_map.get(pkg_key)
                 if pkg_id:
-                    # Write: package_id, scan_id, product_id, path, digest, digest_algo
-                    f.write(f"{pkg_id}\t{scan.id}\t{product.id}\t{parts[3]}\t{parts[4]}\t{parts[5]}\n")
+                    # Write: package_id, scan_id, product_id, system_id, path, digest, digest_algo
+                    f.write(f"{pkg_id}\t{scan.id}\t{product_id}\t{system_id}\t{parts[3]}\t{parts[4]}\t{parts[5]}\n")
                     file_count += 1
                     
                     if file_count % 1000000 == 0:
@@ -508,7 +668,7 @@ def _import_tsv_postgres(db, raw_conn, storage, job, scan, product):
         cursor.copy_from(
             f,
             'files',
-            columns=('package_id', 'scan_id', 'product_id', 'path', 'digest', 'digest_algorithm'),
+            columns=('package_id', 'scan_id', 'product_id', 'system_id', 'path', 'digest', 'digest_algorithm'),
             null='\\N'
         )
     raw_conn.commit()
@@ -520,11 +680,15 @@ def _import_tsv_postgres(db, raw_conn, storage, job, scan, product):
     logger.info(f"Import complete: {pkg_count} packages, {file_count} files")
 
 
-def _import_tsv_sqlite(db, raw_conn, storage, job, scan, product):
+def _import_tsv_sqlite(db, raw_conn, storage, job, scan, product, system):
     """Import TSV files into SQLite."""
     import gzip
     
     cursor = raw_conn.cursor()
+    
+    # Determine if this is a product or system import
+    product_id = product.id if product else None
+    system_id = system.id if system else None
     
     # Download and decompress packages TSV
     logger.info("Downloading packages TSV...")
@@ -540,9 +704,9 @@ def _import_tsv_sqlite(db, raw_conn, storage, job, scan, product):
             parts = [None if p == '\\N' else p for p in parts]
             cursor.execute(
                 """INSERT INTO packages 
-                   (scan_id, product_id, name, version, release, arch, epoch, source_rpm, license, purl, cpes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (scan.id, product.id, *parts)
+                   (scan_id, product_id, system_id, name, version, release, arch, epoch, source_rpm, license, purl, cpes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (scan.id, product_id, system_id, *parts)
             )
             pkg_count += 1
     raw_conn.commit()
@@ -581,9 +745,9 @@ def _import_tsv_sqlite(db, raw_conn, storage, job, scan, product):
             if pkg_id:
                 cursor.execute(
                     """INSERT INTO files 
-                       (package_id, scan_id, product_id, path, digest, digest_algorithm)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (pkg_id, scan.id, product.id, parts[3], parts[4], parts[5])
+                       (package_id, scan_id, product_id, system_id, path, digest, digest_algorithm)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (pkg_id, scan.id, product_id, system_id, parts[3], parts[4], parts[5])
                 )
                 file_count += 1
                 

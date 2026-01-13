@@ -198,3 +198,121 @@ Converting to cyclonedx-xml...
   output/rhel-10.0.json/rhel-10.0.cdx.xml
 rh-syfter export -p rhel -v 10.0 -f all -o output/  532.54s user 20.74s system 99% cpu 9:14.95 total
 ```
+
+## System Mode (Infrastructure Scanning)
+
+RH-Syfter can also be used to scan and track packages across your infrastructure.
+
+### Scanning the Localhost
+
+Scan the local host and tag it for grouping:
+
+```
+❯ rh-syfter system-scan --tag production
+╭────────────────────────────── RH-Syfter System Scan ──────────────────────────────╮
+│ Scanning: localhost                                                               │
+│ Hostname: webserver01.example.com                                                 │
+│ IP: 192.168.1.50                                                                  │
+│ OS: Linux 6.5.0-14-generic                                                        │
+│ Tag: production                                                                   │
+╰───────────────────────────────────────────────────────────────────────────────────╯
+Scanning localhost (webserver01.example.com)...
+Using syft version: 1.40.0
+...
+✓ System scan #1 uploaded to server (job: abc123...)
+```
+
+### Scanning a Remote Host via SSH
+
+Scan a remote host by providing the hostname or IP:
+
+```
+❯ rh-syfter system-scan dbserver.internal --tag databases -u admin
+╭────────────────────────────── RH-Syfter System Scan ──────────────────────────────╮
+│ Scanning: dbserver.internal                                                       │
+│ Hostname: dbserver.internal                                                       │
+│ IP: dbserver.internal                                                             │
+│ OS: Linux 5.14.0-284.el9.x86_64                                                   │
+│ Tag: databases                                                                    │
+╰───────────────────────────────────────────────────────────────────────────────────╯
+Connecting to admin@dbserver.internal...
+Remote syft version: 1.40.0
+Running remote scan on dbserver.internal...
+Remote scan complete
+...
+✓ System scan #2 uploaded to server (job: def456...)
+```
+
+### Listing Systems
+
+View all scanned systems:
+
+```
+❯ rh-syfter systems
+                                      Systems                                       
+                                                                                    
+  Hostname                 IP              Tag          OS                 Packages  Files      Last Scan  
+ ───────────────────────────────────────────────────────────────────────────────────────────────────────── 
+  webserver01.example.com  192.168.1.50    production   Linux 6.5.0-14     1,234     45,678     2024-01-15 
+  dbserver.internal        10.0.0.25       databases    Linux 5.14.0-284   987       32,100     2024-01-15 
+  buildhost.corp           10.0.0.100      build        Linux 6.8.0-31     2,345     89,012     2024-01-14 
+```
+
+### Querying Packages Across Systems
+
+Find which systems have a specific package installed:
+
+```
+❯ rh-syfter system-query -n "openssh%"
+                       System Package Search Results                        
+                                                                             
+  Name            Version              System                   Tag          
+ ─────────────────────────────────────────────────────────────────────────── 
+  openssh         8.7p1-34.el9         webserver01.example.com  production   
+  openssh-server  8.7p1-34.el9         webserver01.example.com  production   
+  openssh-clients 8.7p1-34.el9         webserver01.example.com  production   
+  openssh         9.0p1-10.el10        buildhost.corp           build        
+  openssh-server  9.0p1-10.el10        buildhost.corp           build        
+```
+
+### Filtering by Tag
+
+Find packages only in production systems:
+
+```
+❯ rh-syfter system-query -n "kernel%" --tag production
+                       System Package Search Results                        
+                                                                             
+  Name                   Version              System                   Tag          
+ ──────────────────────────────────────────────────────────────────────────────────
+  kernel                 6.5.0-14.generic     webserver01.example.com  production   
+  kernel-core            6.5.0-14.generic     webserver01.example.com  production   
+```
+
+### Listing Packages for a Specific System
+
+```
+❯ rh-syfter system-list -H webserver01.example.com -t packages | head -20
+NetworkManager-1.42.2-5.el9
+NetworkManager-libnm-1.42.2-5.el9
+acl-2.3.1-4.el9
+audit-libs-3.0.7-104.el9
+basesystem-11-13.el9
+bash-5.1.8-9.el9
+bind-libs-9.16.23-14.el9
+...
+```
+
+### Finding Files Across Systems
+
+Search for specific files across your infrastructure:
+
+```
+❯ rh-syfter system-query -f "%/sbin/sshd"
+                       System File Search Results                        
+                                                                          
+  Path            Package                   System                   Tag  
+ ──────────────────────────────────────────────────────────────────────── 
+  /usr/sbin/sshd  openssh-server-8.7p1-34   webserver01.example.com  production 
+  /usr/sbin/sshd  openssh-server-9.0p1-10   buildhost.corp           build      
+```
