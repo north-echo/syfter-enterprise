@@ -641,7 +641,7 @@ def list_jobs(ctx, status, product, limit):
 @click.option("-t", "--type", "list_type", 
               type=click.Choice(["files", "packages"]), 
               default="files", help="What to list (files or packages)")
-@click.option("--full", is_flag=True, help="Show full package info (name-version-release.arch) instead of just name")
+@click.option("--full", is_flag=True, help="Include architecture in package output (name-version.arch)")
 @click.pass_context
 def list_contents(ctx, product, product_version, list_type, full):
     """
@@ -677,16 +677,13 @@ def _list_local(product, product_version, list_type, full):
             click.echo(path)
     else:
         for pkg in storage.list_all_packages(product, product_version):
-            if full:
-                # Format as name-version.arch (version may already include epoch:ver-release)
-                out = pkg["name"]
-                if pkg.get("version"):
-                    out += f"-{pkg['version']}"
-                if pkg.get("arch"):
-                    out += f".{pkg['arch']}"
-                click.echo(out)
-            else:
-                click.echo(pkg["name"])
+            # Default: name-version, --full adds .arch
+            out = pkg["name"]
+            if pkg.get("version"):
+                out += f"-{pkg['version']}"
+            if full and pkg.get("arch"):
+                out += f".{pkg['arch']}"
+            click.echo(out)
 
 
 def _list_server(ctx, product, product_version, list_type, full):
@@ -704,16 +701,13 @@ def _list_server(ctx, product, product_version, list_type, full):
             else:
                 packages = client.list_all_packages(product, product_version)
                 for pkg in packages:
-                    if full:
-                        # Format as name-version.arch (version may already include epoch:ver-release)
-                        out = pkg["name"]
-                        if pkg.get("version"):
-                            out += f"-{pkg['version']}"
-                        if pkg.get("arch"):
-                            out += f".{pkg['arch']}"
-                        click.echo(out)
-                    else:
-                        click.echo(pkg["name"])
+                    # Default: name-version, --full adds .arch
+                    out = pkg["name"]
+                    if pkg.get("version"):
+                        out += f"-{pkg['version']}"
+                    if full and pkg.get("arch"):
+                        out += f".{pkg['arch']}"
+                    click.echo(out)
     except httpx.ConnectError:
         console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
         sys.exit(1)
