@@ -562,6 +562,7 @@ def get_remote_host_info(
         dict: Host information
     """
     import getpass
+    import socket
     
     ssh_user = user or getpass.getuser()
     ssh_target = f"{ssh_user}@{host}"
@@ -571,6 +572,12 @@ def get_remote_host_info(
         ssh_opts.extend(["-p", str(port)])
     if identity_file:
         ssh_opts.extend(["-i", identity_file])
+    
+    # Resolve hostname to IP address
+    try:
+        ip_address = socket.gethostbyname(host)
+    except socket.gaierror:
+        ip_address = host  # Fallback to provided host if resolution fails
     
     # Get hostname
     result = subprocess.run(
@@ -600,7 +607,7 @@ def get_remote_host_info(
     
     return {
         "hostname": hostname,
-        "ip_address": host,  # Use the provided host as IP
+        "ip_address": ip_address,
         "os_name": os_name,
         "os_version": os_version,
         "architecture": architecture,
