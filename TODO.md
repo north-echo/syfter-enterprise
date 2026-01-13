@@ -297,17 +297,8 @@ $ find /tmp/rhel10.0 -name '389-ds-base-3*'
 /tmp/rhel10.0/x86_64/rhsm-pulp.corp.redhat.com/content/dist/rhel10/10.0/x86_64/appstream/os/Packages/3/389-ds-base-3.0.6-5.el10_0.x86_64.rpm
 ```
 
-## debug files
-
-So Syft has all of these in it's SBOM package list, and it's also unclear if any of these were released as EUS or E4S (we seem to be accounting for both in our SBOM).  We also include `debuginfo` packages in our SBOM, which we probably don't need to do, for sure this is exploding the file size.
-
-``` bash
-$ grep debuginfo rhel-10.0.z.json | wc -l
-67372
-```
-
-There are probably other "debug" files that could be removed as well; they're not really useful and they just make these files giant.
-
 ## Other TODOs
 
 Syft adds a bogus `documentNamespace` to the Anchore web site that probably needs to be removed and some of the other metadata might need to be adjusted.  The Syft data also includes license information that is pulled from the RPMs, which may be fine to leave in the public SBOMs since it's no real work (although it's possible we could pull that from the Syft export).
+
+Using SQLite locally is definitely faster, but the distributed architecture gives us scale at the expense of speed.  This architecture may not be the best, however, when we have thousands of containers and hundreds of products so there is still some stress-testing to do. If it weren't for file processing (which could be invaluable from an incident response perspective), this would be really fast.

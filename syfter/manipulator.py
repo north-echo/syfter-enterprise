@@ -14,12 +14,37 @@ from .models import Product
 
 console = Console()
 
+# Patterns for debug packages to exclude
+DEBUG_PACKAGE_PATTERNS = [
+    "debuginfo",
+    "debugsource",
+]
 
-def modify_sbom(sbom: dict, product: Product) -> dict:
+
+def _is_debug_package(name: str) -> bool:
+    """Check if a package name indicates it's a debug package."""
+    name_lower = name.lower()
+    return any(pattern in name_lower for pattern in DEBUG_PACKAGE_PATTERNS)
+
+
+def _is_debug_file(path: str) -> bool:
+    """Check if a file path is a debug-related file (debuginfo/debugsource RPM or in debug directory)."""
+    path_lower = path.lower()
+    # Check for debug patterns in the path
+    if any(pattern in path_lower for pattern in DEBUG_PACKAGE_PATTERNS):
+        return True
+    # Check if file is under a /debug/ directory
+    if "/debug/" in path_lower:
+        return True
+    return False
+
+
+def modify_sbom(sbom: dict, product: Product, exclude_debug: bool = True) -> dict:
     """
     Modify an SBOM to add product-specific metadata.
 
     This function:
+    - Filters out debug packages (debuginfo, debugsource) if exclude_debug is True
     - Updates CPEs to include the product information
     - Updates PURLs to include the distro qualifier
     - Adds product metadata to the SBOM descriptor
@@ -27,6 +52,7 @@ def modify_sbom(sbom: dict, product: Product) -> dict:
     Args:
         sbom: The original syft-json SBOM
         product: The product metadata to apply
+        exclude_debug: If True, exclude debuginfo and debugsource packages (default: True)
 
     Returns:
         dict: Modified SBOM with product metadata
@@ -45,8 +71,27 @@ def modify_sbom(sbom: dict, product: Product) -> dict:
         "purl_qualifier": product.purl_qualifier,
     }
 
-    # Process artifacts (packages)
+    # Filter and process artifacts (packages)
     artifacts = modified.get("artifacts", [])
+    
+    if exclude_debug:
+        original_count = len(artifacts)
+        artifacts = [a for a in artifacts if not _is_debug_package(a.get("name", ""))]
+        excluded_pkg_count = original_count - len(artifacts)
+        modified["artifacts"] = artifacts
+        if excluded_pkg_count > 0:
+            console.print(f"[dim]Excluded {excluded_pkg_count} debug packages (debuginfo/debugsource)[/dim]")
+        
+        # Also filter source files (the .rpm file entries themselves)
+        files = modified.get("files", [])
+        if files:
+            original_file_count = len(files)
+            files = [f for f in files if not _is_debug_file(f.get("location", {}).get("path", ""))]
+            excluded_file_count = original_file_count - len(files)
+            modified["files"] = files
+            if excluded_file_count > 0:
+                console.print(f"[dim]Excluded {excluded_file_count} debug source files[/dim]")
+    
     for artifact in artifacts:
         _modify_artifact_cpes(artifact, product)
         _modify_artifact_purl(artifact, product)
@@ -244,12 +289,13 @@ def _modify_artifact_purl(artifact: dict, product: Product) -> None:
             pass
 
 
-def extract_packages(sbom: dict) -> list[dict]:
+def extract_packages(sbom: dict, skip_files: bool = False) -> list[dict]:
     """
     Extract package information from an SBOM for indexing.
 
     Args:
         sbom: The syft-json SBOM
+        skip_files: If True, don't extract file information (saves memory for large scans)
 
     Returns:
         list: List of package dictionaries with extracted info
@@ -277,7 +323,7 @@ def extract_packages(sbom: dict) -> list[dict]:
             "license": _extract_license(artifact),
             "purl": artifact.get("purl", ""),
             "cpes": json.dumps(cpe_strings),
-            "files": _extract_files(artifact),
+            "files": [] if skip_files else _extract_files(artifact),
         }
         packages.append(pkg)
 

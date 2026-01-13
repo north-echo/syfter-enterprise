@@ -79,8 +79,8 @@ def export_sbom(
         output = result.stdout
 
         if output_path:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(output)
-            console.print(f"[green]Wrote {output_format} to {output_path}[/green]")
 
         return output
 

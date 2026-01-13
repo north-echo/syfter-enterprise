@@ -1,8 +1,14 @@
 """
 CLI interface for RH-Syfter.
+
+Supports two modes:
+- Server mode: Uses API server (set SYFTER_SERVER env var)
+- Local mode: Direct SQLite access (for development/testing)
 """
 
+import gzip
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -25,7 +31,6 @@ from .scanner import (
     ScanError,
 )
 from .manipulator import modify_sbom, extract_packages
-from .storage import Storage, DEFAULT_DB_PATH
 from .exporter import (
     export_to_spdx_json,
     export_to_spdx_tv,
@@ -38,102 +43,63 @@ from .exporter import (
 console = Console()
 
 
+def get_server_url() -> Optional[str]:
+    """Get the server URL from environment or None for local mode."""
+    return os.getenv("SYFTER_SERVER")
+
+
+def is_server_mode() -> bool:
+    """Check if running in server mode."""
+    return get_server_url() is not None
+
+
 @click.group()
 @click.version_option(version=__version__)
 @click.option(
-    "--db",
-    "db_path",
-    type=click.Path(path_type=Path),
-    default=None,
-    envvar="SYFTER_DB",
-    help="Path to database file (default: ~/.rh-syfter/syfter.db)",
+    "--server",
+    "server_url",
+    envvar="SYFTER_SERVER",
+    help="API server URL (default: local mode)",
+)
+@click.option(
+    "--local",
+    "force_local",
+    is_flag=True,
+    help="Force local mode even if SYFTER_SERVER is set",
 )
 @click.pass_context
-def main(ctx, db_path: Optional[Path]):
+def main(ctx, server_url: Optional[str], force_local: bool):
     """
     RH-Syfter: SBOM generation and management for Red Hat products.
 
     Scan RPM directories, containers, and other artifacts to generate SBOMs,
     enrich them with product metadata, and query across all your products.
+
+    Modes:
+      - Server mode: Set SYFTER_SERVER=http://server:8000 or use --server
+      - Local mode: Uses local SQLite database (default, or use --local)
     """
     ctx.ensure_object(dict)
-    ctx.obj["db_path"] = db_path
+    ctx.obj["server_url"] = None if force_local else server_url
+    ctx.obj["local_mode"] = force_local or server_url is None
 
 
 @main.command()
 @click.argument("target", type=str)
-@click.option(
-    "-p", "--product",
-    required=True,
-    help="Product name (e.g., 'rhel')",
-)
-@click.option(
-    "-v", "--version",
-    "product_version",
-    required=True,
-    help="Product version (e.g., '10.0')",
-)
-@click.option(
-    "--vendor",
-    default="Red Hat",
-    help="Vendor name (default: 'Red Hat')",
-)
-@click.option(
-    "--cpe-vendor",
-    default="redhat",
-    help="CPE vendor string (default: 'redhat')",
-)
-@click.option(
-    "--purl-namespace",
-    default="redhat",
-    help="PURL namespace (default: 'redhat')",
-)
-@click.option(
-    "--description",
-    default="",
-    help="Product description",
-)
-@click.option(
-    "-o", "--output",
-    type=click.Path(path_type=Path),
-    help="Write modified SBOM to file (in addition to storing)",
-)
-@click.option(
-    "--original-output",
-    type=click.Path(path_type=Path),
-    help="Write original (unmodified) SBOM to file",
-)
-@click.option(
-    "--no-store",
-    is_flag=True,
-    help="Don't store in database (just output)",
-)
-@click.option(
-    "-s", "--source",
-    type=click.Choice(["auto", "podman", "docker", "registry", "skopeo"]),
-    default="auto",
-    help="Container image source (default: auto-detect). Use 'podman' to pull via podman, "
-         "'registry' for direct OCI registry pull, 'docker' for docker daemon, "
-         "'skopeo' to pull via skopeo (most reliable for authenticated registries).",
-)
-@click.option(
-    "--pull-first",
-    is_flag=True,
-    help="Pull image with skopeo to local OCI directory before scanning. "
-         "Most reliable method for authenticated registries like registry.redhat.io.",
-)
-@click.option(
-    "--arch",
-    type=click.Choice(["amd64", "arm64", "ppc64le", "s390x"]),
-    default=None,
-    help="Architecture to pull for container images (default: amd64). "
-         "Use when pulling multi-arch images with skopeo.",
-)
-@click.option(
-    "-q", "--quiet",
-    is_flag=True,
-    help="Suppress syft progress output.",
-)
+@click.option("-p", "--product", required=True, help="Product name (e.g., 'rhel')")
+@click.option("-v", "--version", "product_version", required=True, help="Product version (e.g., '10.0')")
+@click.option("--vendor", default="Red Hat", help="Vendor name")
+@click.option("--cpe-vendor", default="redhat", help="CPE vendor string")
+@click.option("--purl-namespace", default="redhat", help="PURL namespace")
+@click.option("--description", default="", help="Product description")
+@click.option("-o", "--output", type=click.Path(path_type=Path), help="Write SBOM to file")
+@click.option("--no-store", is_flag=True, help="Don't store (just output)")
+@click.option("-s", "--source", type=click.Choice(["auto", "podman", "docker", "registry", "skopeo"]), default="auto")
+@click.option("--pull-first", is_flag=True, help="Pull image with skopeo first")
+@click.option("--arch", type=click.Choice(["amd64", "arm64", "ppc64le", "s390x"]), default=None)
+@click.option("-q", "--quiet", is_flag=True, help="Suppress progress output")
+@click.option("--skip-files", is_flag=True, help="Skip file indexing (faster, uses less memory)")
+@click.option("--include-debug", is_flag=True, help="Include debuginfo/debugsource packages (excluded by default)")
 @click.pass_context
 def scan(
     ctx,
@@ -145,38 +111,21 @@ def scan(
     purl_namespace: str,
     description: str,
     output: Optional[Path],
-    original_output: Optional[Path],
     no_store: bool,
     source: str,
     pull_first: bool,
     arch: Optional[str],
     quiet: bool,
+    skip_files: bool,
+    include_debug: bool,
 ):
-    """
-    Scan a target and store the SBOM with product metadata.
-
-    TARGET can be:
-    - A directory path (e.g., /path/to/rpms)
-    - A container image (e.g., registry.redhat.io/rhel9:latest)
-    - A prefixed path (e.g., dir:/path, podman:image:tag)
-
-    Examples:
-
-        rh-syfter scan /path/to/rpms -p rhel -v 10.0
-
-        rh-syfter scan registry.redhat.io/rhel9:latest -p rhel -v 9.0
-
-        rh-syfter scan registry.redhat.io/ubi9:latest -p ubi -v 9.0 --source podman
-
-        rh-syfter scan ./packages -p openshift -v 4.14 --description "OCP 4.14"
-    """
+    """Scan a target and store the SBOM with product metadata."""
     try:
         check_syft_installed()
     except SyftNotFoundError as e:
         console.print(f"[red]Error: {e}[/red]")
         sys.exit(1)
 
-    # Create product
     prod = Product(
         name=product,
         version=product_version,
@@ -189,311 +138,351 @@ def scan(
     console.print(Panel(
         f"[bold]Scanning:[/bold] {target}\n"
         f"[bold]Product:[/bold] {prod.full_name}\n"
-        f"[bold]CPE Prefix:[/bold] {prod.cpe_prefix}\n"
-        f"[bold]PURL Qualifier:[/bold] {prod.purl_qualifier}",
+        f"[bold]Mode:[/bold] {'Server' if not ctx.obj['local_mode'] else 'Local'}",
         title="RH-Syfter Scan",
         box=box.ROUNDED,
     ))
 
-    # Determine source type and scan
     source_type = get_source_type(target)
     console.print(f"[dim]Source type: {source_type}[/dim]")
 
     try:
+        exclude_debug = not include_debug
         if source_type == "directory":
             path = Path(target.replace("dir:", ""))
             original_sbom, syft_version = scan_directory(
-                path,
-                show_progress=not quiet,
-                name=prod.full_name,
-                version=product_version,
+                path, show_progress=not quiet, name=prod.full_name, version=product_version,
+                exclude_debug=exclude_debug
             )
         elif source_type == "container":
-            # Pass source if not auto, otherwise let scan_container auto-detect
             container_source = None if source == "auto" else source
             original_sbom, syft_version = scan_container(
-                target,
-                source=container_source,
-                pull_first=pull_first,
-                arch=arch,
-                show_progress=not quiet,
-                name=prod.full_name,
-                version=product_version,
+                target, source=container_source, pull_first=pull_first,
+                arch=arch, show_progress=not quiet, name=prod.full_name, version=product_version,
+                exclude_debug=exclude_debug
             )
         else:
             original_sbom, syft_version = scan_target(
-                target,
-                show_progress=not quiet,
-                name=prod.full_name,
-                version=product_version,
+                target, show_progress=not quiet, name=prod.full_name, version=product_version,
+                exclude_debug=exclude_debug
             )
     except ScanError as e:
         console.print(f"[red]Scan failed: {e}[/red]")
         sys.exit(1)
 
-    # Save original if requested
-    if original_output:
-        original_output.write_text(json.dumps(original_sbom, indent=2))
-        console.print(f"[green]Wrote original SBOM to {original_output}[/green]")
+    modified_sbom = modify_sbom(original_sbom, prod, exclude_debug=not include_debug)
+    packages = extract_packages(modified_sbom, skip_files=skip_files)
+    
+    if skip_files:
+        console.print("[yellow]Note: File indexing skipped (--skip-files). File search won't work for this scan.[/yellow]")
 
-    # Modify SBOM with product metadata
-    modified_sbom = modify_sbom(original_sbom, prod)
-
-    # Extract packages for indexing
-    packages = extract_packages(modified_sbom)
-
-    # Save modified SBOM if requested
     if output:
         output.write_text(json.dumps(modified_sbom, indent=2))
-        console.print(f"[green]Wrote modified SBOM to {output}[/green]")
+        console.print(f"[green]Wrote SBOM to {output}[/green]")
 
-    # Store in database
-    if not no_store:
-        storage = Storage(ctx.obj.get("db_path"))
-        product_id = storage.get_or_create_product(prod)
-        scan_id = storage.store_scan(
-            product_id=product_id,
-            source_path=target,
-            source_type=source_type,
-            syft_version=syft_version,
-            original_sbom=original_sbom,
-            modified_sbom=modified_sbom,
-            packages=packages,
-        )
-        console.print(f"[green]✓ Scan #{scan_id} stored successfully[/green]")
+    if no_store:
+        console.print("[yellow]Skipped storage (--no-store)[/yellow]")
+        return
+
+    if ctx.obj["local_mode"]:
+        _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages)
     else:
-        console.print("[yellow]Skipped database storage (--no-store)[/yellow]")
+        _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages)
+
+
+def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages):
+    """Store scan using local SQLite storage."""
+    from .storage import Storage
+
+    storage = Storage()
+    product_id = storage.get_or_create_product(prod)
+    scan_id = storage.store_scan(
+        product_id=product_id,
+        source_path=target,
+        source_type=source_type,
+        syft_version=syft_version,
+        original_sbom=original_sbom,
+        modified_sbom=modified_sbom,
+        packages=packages,
+    )
+    console.print(f"[green]✓ Scan #{scan_id} stored locally[/green]")
+
+
+def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages):
+    """Store scan using API server with async job-based flow."""
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            # Use async job-based upload for memory efficiency
+            result = client.upload_scan_async(
+                product_name=prod.name,
+                product_version=prod.version,
+                source_path=target,
+                source_type=source_type,
+                syft_version=syft_version,
+                original_sbom=original_sbom,
+                modified_sbom=modified_sbom,
+                packages=packages,
+            )
+            scan_id = result.get("scan_id", "unknown")
+            console.print(f"[green]✓ Scan #{scan_id} uploaded to server (job: {result['id']})[/green]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Upload failed: {e}[/red]")
+        sys.exit(1)
 
 
 @main.command("query")
-@click.option(
-    "-n", "--name",
-    help="Package name pattern (use % as wildcard)",
-)
-@click.option(
-    "-f", "--file",
-    "file_path",
-    help="File path pattern (use % as wildcard)",
-)
-@click.option(
-    "-d", "--digest",
-    help="File digest (exact match)",
-)
-@click.option(
-    "-p", "--product",
-    help="Filter by product name",
-)
-@click.option(
-    "-v", "--version",
-    "product_version",
-    help="Filter by product version",
-)
-@click.option(
-    "--limit",
-    type=int,
-    default=50,
-    help="Maximum results (default: 50)",
-)
-@click.option(
-    "--json",
-    "output_json",
-    is_flag=True,
-    help="Output as JSON",
-)
+@click.option("-n", "--name", help="Package name pattern (use %% as wildcard)")
+@click.option("-f", "--file", "file_path", help="File path pattern")
+@click.option("-d", "--digest", help="File digest (exact match)")
+@click.option("-p", "--product", help="Filter by product name")
+@click.option("-v", "--version", "product_version", help="Filter by product version")
+@click.option("--limit", type=int, default=50, help="Maximum results")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def query(
-    ctx,
-    name: Optional[str],
-    file_path: Optional[str],
-    digest: Optional[str],
-    product: Optional[str],
-    product_version: Optional[str],
-    limit: int,
-    output_json: bool,
-):
-    """
-    Query packages and files across all products.
+def query(ctx, name, file_path, digest, product, product_version, limit, output_json):
+    """Query packages and files across all products."""
+    if ctx.obj["local_mode"]:
+        _query_local(name, file_path, digest, product, product_version, limit, output_json)
+    else:
+        _query_server(ctx, name, file_path, digest, product, product_version, limit, output_json)
 
-    Examples:
 
-        rh-syfter query -n "kernel%"
+def _query_local(name, file_path, digest, product, product_version, limit, output_json):
+    """Query using local SQLite storage."""
+    from .storage import Storage
 
-        rh-syfter query -f "%/bin/bash"
-
-        rh-syfter query -n "openssl%" -p rhel -v 10.0
-
-        rh-syfter query -d "sha256:abc123..."
-    """
-    storage = Storage(ctx.obj.get("db_path"))
+    storage = Storage()
 
     if file_path or digest:
-        # Search files
         results = storage.search_files(
-            path_pattern=file_path,
-            digest=digest,
-            product_name=product,
-            product_version=product_version,
-            limit=limit,
+            path_pattern=file_path, digest=digest,
+            product_name=product, product_version=product_version, limit=limit
         )
-
         if output_json:
             click.echo(json.dumps(results, indent=2))
             return
-
         if not results:
-            console.print("[yellow]No files found matching criteria[/yellow]")
+            console.print("[yellow]No files found[/yellow]")
             return
-
         table = Table(title="File Search Results", box=box.SIMPLE)
         table.add_column("Path", style="cyan")
         table.add_column("Package", style="green")
         table.add_column("Product", style="magenta")
-        table.add_column("Digest", style="dim", max_width=20)
-
         for row in results:
-            table.add_row(
-                row["path"],
-                f"{row['package_name']}-{row['package_version']}",
-                f"{row['product_name']}-{row['product_version']}",
-                (row["digest"][:20] + "...") if row["digest"] else "",
-            )
-
+            pkg_info = row['package_name']
+            if row.get('package_version'):
+                pkg_info += f"-{row['package_version']}"
+            table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
         console.print(table)
 
     elif name:
-        # Search packages
         results = storage.search_packages(
-            name_pattern=name,
-            product_name=product,
-            product_version=product_version,
-            limit=limit,
+            name_pattern=name, product_name=product, product_version=product_version, limit=limit
         )
-
         if output_json:
             click.echo(json.dumps(results, indent=2))
             return
-
         if not results:
-            console.print("[yellow]No packages found matching criteria[/yellow]")
+            console.print("[yellow]No packages found[/yellow]")
             return
-
         table = Table(title="Package Search Results", box=box.SIMPLE)
         table.add_column("Name", style="cyan")
         table.add_column("Version", style="green")
-        table.add_column("Arch", style="yellow")
         table.add_column("Product", style="magenta")
-        table.add_column("PURL", style="dim", max_width=40)
-
         for row in results:
-            version = row["version"]
-            if row["release"]:
-                version = f"{version}-{row['release']}"
-
-            table.add_row(
-                row["name"],
-                version,
-                row["arch"] or "",
-                f"{row['product_name']}-{row['product_version']}",
-                (row["purl"][:40] + "...") if len(row["purl"]) > 40 else row["purl"],
-            )
-
+            table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
         console.print(table)
-
     else:
         console.print("[yellow]Please specify --name, --file, or --digest[/yellow]")
+
+
+def _query_server(ctx, name, file_path, digest, product, product_version, limit, output_json):
+    """Query using API server."""
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            if file_path or digest:
+                results = client.search_files(
+                    path=file_path, digest=digest,
+                    product_name=product, product_version=product_version, limit=limit
+                )
+                if output_json:
+                    click.echo(json.dumps(results, indent=2))
+                    return
+                if not results:
+                    console.print("[yellow]No files found[/yellow]")
+                    return
+                table = Table(title="File Search Results", box=box.SIMPLE)
+                table.add_column("Path", style="cyan")
+                table.add_column("Package", style="green")
+                table.add_column("Product", style="magenta")
+                for row in results:
+                    pkg_info = row['package_name']
+                    if row.get('package_version'):
+                        pkg_info += f"-{row['package_version']}"
+                    table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
+                console.print(table)
+
+            elif name:
+                results = client.search_packages(
+                    name=name, product_name=product, product_version=product_version, limit=limit
+                )
+                if output_json:
+                    click.echo(json.dumps(results, indent=2))
+                    return
+                if not results:
+                    console.print("[yellow]No packages found[/yellow]")
+                    return
+                table = Table(title="Package Search Results", box=box.SIMPLE)
+                table.add_column("Name", style="cyan")
+                table.add_column("Version", style="green")
+                table.add_column("Product", style="magenta")
+                for row in results:
+                    table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
+                console.print(table)
+            else:
+                console.print("[yellow]Please specify --name, --file, or --digest[/yellow]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Query failed: {e}[/red]")
         sys.exit(1)
 
 
+def _get_format_extension(output_format: str) -> str:
+    """Get the file extension for a given format."""
+    extensions = {
+        "syft-json": ".syft.json",
+        "spdx-json": ".spdx.json",
+        "spdx-tv": ".spdx",
+        "cyclonedx-json": ".cdx.json",
+        "cyclonedx-xml": ".cdx.xml",
+    }
+    return extensions.get(output_format, ".json")
+
+
+def _resolve_output_path(output: Optional[Path], product: str, version: str, output_format: str) -> Optional[Path]:
+    """
+    Resolve the output path, inferring filename if output is a directory.
+    
+    Returns None if no output specified (stdout), or the resolved file path.
+    """
+    if output is None:
+        return None
+    
+    # If it's an existing directory, infer filename
+    if output.is_dir():
+        ext = _get_format_extension(output_format)
+        filename = f"{product}-{version}{ext}"
+        return output / filename
+    
+    # If parent doesn't exist yet, that's fine - it will be created
+    # If it's a file path, use as-is
+    return output
+
+
 @main.command("export")
-@click.option(
-    "-p", "--product",
-    required=True,
-    help="Product name",
-)
-@click.option(
-    "-v", "--version",
-    "product_version",
-    required=True,
-    help="Product version",
-)
-@click.option(
-    "-f", "--format",
-    "output_format",
-    type=click.Choice(["syft-json", "spdx-json", "spdx-tv", "cyclonedx-json", "cyclonedx-xml", "all"]),
-    default="spdx-json",
-    help="Output format (default: spdx-json)",
-)
-@click.option(
-    "-o", "--output",
-    type=click.Path(path_type=Path),
-    help="Output file or directory (for 'all' format)",
-)
+@click.option("-p", "--product", required=True, help="Product name")
+@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("-f", "--format", "output_format", 
+              type=click.Choice(["syft-json", "spdx-json", "spdx-tv", "cyclonedx-json", "cyclonedx-xml", "all"]),
+              default="spdx-json", help="Output format")
+@click.option("-o", "--output", type=click.Path(path_type=Path), 
+              help="Output file or directory (if directory, filename is inferred as product-version.ext)")
 @click.pass_context
-def export_cmd(
-    ctx,
-    product: str,
-    product_version: str,
-    output_format: str,
-    output: Optional[Path],
-):
-    """
-    Export a product's SBOM to various formats.
+def export_cmd(ctx, product, product_version, output_format, output):
+    """Export a product's SBOM to various formats."""
+    # Resolve output path early, before fetching SBOM
+    resolved_output = _resolve_output_path(output, product, product_version, output_format)
+    
+    if ctx.obj["local_mode"]:
+        _export_local(product, product_version, output_format, resolved_output)
+    else:
+        _export_server(ctx, product, product_version, output_format, resolved_output)
 
-    Examples:
 
-        rh-syfter export -p rhel -v 10.0 -f spdx-json -o rhel-10.spdx.json
+def _export_local(product, product_version, output_format, output):
+    """Export using local storage."""
+    from .storage import Storage
 
-        rh-syfter export -p rhel -v 10.0 -f all -o ./sboms/
-
-        rh-syfter export -p openshift -v 4.14 -f cyclonedx-json
-    """
-    storage = Storage(ctx.obj.get("db_path"))
-
-    # Get the SBOM
+    storage = Storage()
     sbom = storage.get_product_sbom(product, product_version)
     if not sbom:
         console.print(f"[red]No SBOM found for {product}-{product_version}[/red]")
         sys.exit(1)
 
+    _do_export(sbom, product, product_version, output_format, output)
+
+
+def _export_server(ctx, product, product_version, output_format, output):
+    """Export using API server."""
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            data = client.get_sbom(product, product_version)
+            sbom = json.loads(gzip.decompress(data).decode("utf-8"))
+            _do_export(sbom, product, product_version, output_format, output)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Export failed: {e}[/red]")
+        sys.exit(1)
+
+
+def _do_export(sbom, product, product_version, output_format, output):
+    """Perform the actual export."""
     if output_format == "syft-json":
-        # Just output the stored syft-json
         output_str = json.dumps(sbom, indent=2)
         if output:
+            output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(output_str)
-            console.print(f"[green]Wrote syft-json to {output}[/green]")
+            console.print(f"[green]✓ Wrote {output_format} to {output}[/green]")
         else:
             click.echo(output_str)
         return
 
     if output_format == "all":
-        # Export to all formats
         if not output:
             output = Path(".")
         output.mkdir(parents=True, exist_ok=True)
-
         base_name = f"{product}-{product_version}"
         results = batch_export(sbom, output, base_name)
-
-        console.print(f"[green]Exported to {len(results)} formats:[/green]")
+        console.print(f"[green]✓ Exported to {len(results)} formats in {output}/[/green]")
         for fmt, path in results.items():
-            console.print(f"  - {fmt}: {path}")
+            console.print(f"  [dim]{path}[/dim]")
         return
 
-    # Export to specific format
+    format_map = {
+        "spdx-json": export_to_spdx_json,
+        "spdx-tv": export_to_spdx_tv,
+        "cyclonedx-json": export_to_cyclonedx_json,
+        "cyclonedx-xml": export_to_cyclonedx_xml,
+    }
+
     try:
-        format_map = {
-            "spdx-json": export_to_spdx_json,
-            "spdx-tv": export_to_spdx_tv,
-            "cyclonedx-json": export_to_cyclonedx_json,
-            "cyclonedx-xml": export_to_cyclonedx_xml,
-        }
-
-        export_func = format_map[output_format]
-        result = export_func(sbom, output)
-
-        if not output:
+        result = format_map[output_format](sbom, output)
+        if output:
+            console.print(f"[green]✓ Wrote {output_format} to {output}[/green]")
+        else:
             click.echo(result)
-
     except ExportError as e:
         console.print(f"[red]Export failed: {e}[/red]")
         sys.exit(1)
@@ -503,71 +492,41 @@ def export_cmd(
 @click.pass_context
 def list_products(ctx):
     """List all products in the database."""
-    storage = Storage(ctx.obj.get("db_path"))
-    products = storage.list_products()
+    if ctx.obj["local_mode"]:
+        from .storage import Storage
+        storage = Storage()
+        products = storage.list_products()
+    else:
+        import httpx
+        from .client import SyfterClient
+        try:
+            with SyfterClient(ctx.obj["server_url"]) as client:
+                products = client.list_products()
+        except httpx.ConnectError:
+            console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+            console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(ctx.obj['server_url']))
+            sys.exit(1)
 
     if not products:
-        console.print("[yellow]No products found. Run 'rh-syfter scan' to add one.[/yellow]")
+        console.print("[yellow]No products found[/yellow]")
         return
 
     table = Table(title="Products", box=box.SIMPLE)
     table.add_column("Name", style="cyan")
     table.add_column("Version", style="green")
-    table.add_column("Vendor", style="yellow")
     table.add_column("Scans", justify="right")
     table.add_column("Packages", justify="right")
+    table.add_column("Files", justify="right")
 
     for p in products:
+        total_files = p.get("total_files", 0) if isinstance(p, dict) else getattr(p, "total_files", 0)
         table.add_row(
-            p["name"],
-            p["version"],
-            p["vendor"],
-            str(p["scan_count"] or 0),
-            str(p["total_packages"] or 0),
+            p["name"] if isinstance(p, dict) else p.name,
+            p["version"] if isinstance(p, dict) else p.version,
+            str(p.get("scan_count", 0) if isinstance(p, dict) else getattr(p, "scan_count", 0)),
+            str(p.get("total_packages", 0) if isinstance(p, dict) else getattr(p, "total_packages", 0)),
+            f"{total_files:,}" if total_files else "0",
         )
-
-    console.print(table)
-
-
-@main.command("scans")
-@click.option(
-    "-p", "--product",
-    help="Filter by product name",
-)
-@click.pass_context
-def list_scans(ctx, product: Optional[str]):
-    """List all scans in the database."""
-    storage = Storage(ctx.obj.get("db_path"))
-    scans = storage.list_scans(product_name=product)
-
-    if not scans:
-        console.print("[yellow]No scans found.[/yellow]")
-        return
-
-    table = Table(title="Scans", box=box.SIMPLE)
-    table.add_column("ID", justify="right")
-    table.add_column("Product", style="cyan")
-    table.add_column("Source", style="green", max_width=40)
-    table.add_column("Type", style="yellow")
-    table.add_column("Packages", justify="right")
-    table.add_column("Files", justify="right")
-    table.add_column("Timestamp")
-
-    for s in scans:
-        source = s["source_path"]
-        if len(source) > 40:
-            source = "..." + source[-37:]
-
-        table.add_row(
-            str(s["id"]),
-            f"{s['product_name']}-{s['product_version']}",
-            source,
-            s["source_type"],
-            str(s["package_count"]),
-            str(s["file_count"]),
-            s["scan_timestamp"][:19] if s["scan_timestamp"] else "",
-        )
-
     console.print(table)
 
 
@@ -575,51 +534,256 @@ def list_scans(ctx, product: Optional[str]):
 @click.pass_context
 def stats(ctx):
     """Show database statistics."""
-    storage = Storage(ctx.obj.get("db_path"))
-    s = storage.get_stats()
+    if ctx.obj["local_mode"]:
+        from .storage import Storage
+        storage = Storage()
+        s = storage.get_stats()
+        storage_type = "local"
+        db_type = "sqlite"
+    else:
+        import httpx
+        from .client import SyfterClient
+        try:
+            with SyfterClient(ctx.obj["server_url"]) as client:
+                s = client.get_stats()
+                storage_type = s.get("storage_type", "unknown")
+                db_type = s.get("database_type", "unknown")
+        except httpx.ConnectError:
+            console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+            console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(ctx.obj['server_url']))
+            sys.exit(1)
 
     console.print(Panel(
-        f"[bold]Database:[/bold] {s['database_path']}\n"
-        f"[bold]Products:[/bold] {s['products']}\n"
-        f"[bold]Scans:[/bold] {s['scans']}\n"
-        f"[bold]Packages:[/bold] {s['packages']}\n"
-        f"[bold]Files:[/bold] {s['files']}",
-        title="Database Statistics",
+        f"[bold]Mode:[/bold] {'Server' if not ctx.obj['local_mode'] else 'Local'}\n"
+        f"[bold]Database:[/bold] {db_type}\n"
+        f"[bold]Storage:[/bold] {storage_type}\n"
+        f"[bold]Products:[/bold] {s.get('products', 0)}\n"
+        f"[bold]Scans:[/bold] {s.get('scans', 0)}\n"
+        f"[bold]Packages:[/bold] {s.get('packages', 0)}\n"
+        f"[bold]Files:[/bold] {s.get('files', 0)}",
+        title="Statistics",
         box=box.ROUNDED,
     ))
 
 
-@main.command("delete-scan")
-@click.argument("scan_id", type=int)
-@click.option(
-    "--yes",
-    is_flag=True,
-    help="Skip confirmation",
-)
-@click.pass_context
-def delete_scan(ctx, scan_id: int, yes: bool):
-    """Delete a scan by ID."""
-    storage = Storage(ctx.obj.get("db_path"))
-
-    if not yes:
-        if not click.confirm(f"Delete scan #{scan_id}?"):
-            console.print("[yellow]Cancelled[/yellow]")
-            return
-
-    if storage.delete_scan(scan_id):
-        console.print(f"[green]Deleted scan #{scan_id}[/green]")
-    else:
-        console.print(f"[red]Scan #{scan_id} not found[/red]")
-
-
 @main.command("check")
 def check():
-    """Check if syft is installed and show version."""
+    """Check if syft is installed."""
     try:
         version = check_syft_installed()
         console.print(f"[green]✓ Syft is installed (version {version})[/green]")
     except SyftNotFoundError as e:
         console.print(f"[red]✗ {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("jobs")
+@click.option("-s", "--status", type=click.Choice(["pending", "processing", "complete", "failed"]), help="Filter by status")
+@click.option("-p", "--product", help="Filter by product name")
+@click.option("--limit", type=int, default=20, help="Maximum results")
+@click.pass_context
+def list_jobs(ctx, status, product, limit):
+    """List import jobs (server mode only)."""
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Jobs are only available in server mode[/yellow]")
+        return
+    
+    from .client import SyfterClient, APIError
+    import httpx
+    
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            result = client.list_jobs(status=status, product_name=product, limit=limit)
+            jobs = result.get("jobs", [])
+            
+            if not jobs:
+                console.print("[yellow]No jobs found[/yellow]")
+                return
+            
+            table = Table(title=f"Import Jobs ({result.get('total', len(jobs))} total)", box=box.SIMPLE)
+            table.add_column("ID", style="dim", max_width=8)
+            table.add_column("Product", style="cyan")
+            table.add_column("Status", style="bold")
+            table.add_column("Packages", justify="right")
+            table.add_column("Files", justify="right")
+            table.add_column("Created", style="dim")
+            
+            for job in jobs:
+                status_style = {
+                    "pending": "yellow",
+                    "processing": "blue",
+                    "complete": "green",
+                    "failed": "red",
+                }.get(job["status"], "white")
+                
+                created = job.get("created_at", "")[:19].replace("T", " ")
+                
+                table.add_row(
+                    job["id"][:8],
+                    f"{job['product_name']}-{job['product_version']}",
+                    f"[{status_style}]{job['status']}[/{status_style}]",
+                    f"{job['processed_packages']}/{job['total_packages']}",
+                    f"{job['processed_files']}/{job['total_files']}",
+                    created,
+                )
+            console.print(table)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Failed to list jobs: {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("list")
+@click.option("-p", "--product", required=True, help="Product name")
+@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("-t", "--type", "list_type", 
+              type=click.Choice(["files", "packages"]), 
+              default="files", help="What to list (files or packages)")
+@click.option("--full", is_flag=True, help="Show full package info (name-version-release.arch) instead of just name")
+@click.pass_context
+def list_contents(ctx, product, product_version, list_type, full):
+    """
+    List files or packages for a product version.
+    
+    Outputs a flat list to stdout, one item per line, suitable for 
+    piping to grep, sort, wc, etc.
+    
+    Examples:
+    
+        rh-syfter list -p rhel -v 10.0 -t files > files.txt
+        
+        rh-syfter list -p rhel -v 10.0 -t files | grep libssl
+        
+        rh-syfter list -p rhel -v 10.0 -t packages | wc -l
+        
+        rh-syfter list -p rhel -v 10.0 -t packages --full
+    """
+    if ctx.obj["local_mode"]:
+        _list_local(product, product_version, list_type, full)
+    else:
+        _list_server(ctx, product, product_version, list_type, full)
+
+
+def _list_local(product, product_version, list_type, full):
+    """List using local storage."""
+    from .storage import Storage
+    
+    storage = Storage()
+    
+    if list_type == "files":
+        for path in storage.list_all_files(product, product_version):
+            click.echo(path)
+    else:
+        for pkg in storage.list_all_packages(product, product_version):
+            if full:
+                # Format as name-version.arch (version may already include epoch:ver-release)
+                out = pkg["name"]
+                if pkg.get("version"):
+                    out += f"-{pkg['version']}"
+                if pkg.get("arch"):
+                    out += f".{pkg['arch']}"
+                click.echo(out)
+            else:
+                click.echo(pkg["name"])
+
+
+def _list_server(ctx, product, product_version, list_type, full):
+    """List using server."""
+    from .client import SyfterClient, APIError
+    import httpx
+    
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            if list_type == "files":
+                paths = client.list_all_files(product, product_version)
+                for path in paths:
+                    click.echo(path)
+            else:
+                packages = client.list_all_packages(product, product_version)
+                for pkg in packages:
+                    if full:
+                        # Format as name-version.arch (version may already include epoch:ver-release)
+                        out = pkg["name"]
+                        if pkg.get("version"):
+                            out += f"-{pkg['version']}"
+                        if pkg.get("arch"):
+                            out += f".{pkg['arch']}"
+                        click.echo(out)
+                    else:
+                        click.echo(pkg["name"])
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]List failed: {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("job")
+@click.argument("job_id")
+@click.option("--wait", is_flag=True, help="Wait for job to complete")
+@click.option("--cancel", is_flag=True, help="Cancel the job")
+@click.pass_context
+def job_detail(ctx, job_id, wait, cancel):
+    """Get details of a specific job or wait for it to complete."""
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Jobs are only available in server mode[/yellow]")
+        return
+    
+    from .client import SyfterClient, APIError
+    import httpx
+    
+    try:
+        with SyfterClient(ctx.obj["server_url"]) as client:
+            if cancel:
+                result = client.cancel_job(job_id)
+                console.print(f"[green]Job {job_id} cancelled[/green]")
+                return
+            
+            if wait:
+                console.print(f"[dim]Waiting for job {job_id} to complete...[/dim]")
+                job = client.wait_for_job(job_id)
+            else:
+                job = client.get_job(job_id)
+            
+            status_style = {
+                "pending": "yellow",
+                "processing": "blue",
+                "complete": "green",
+                "failed": "red",
+            }.get(job["status"], "white")
+            
+            info = (
+                f"[bold]Job ID:[/bold] {job['id']}\n"
+                f"[bold]Status:[/bold] [{status_style}]{job['status']}[/{status_style}]\n"
+                f"[bold]Product:[/bold] {job['product_name']}-{job['product_version']}\n"
+                f"[bold]Source:[/bold] {job['source_path']}\n"
+                f"[bold]Packages:[/bold] {job['processed_packages']}/{job['total_packages']}\n"
+                f"[bold]Files:[/bold] {job['processed_files']}/{job['total_files']}\n"
+            )
+            
+            if job.get("scan_id"):
+                info += f"[bold]Scan ID:[/bold] {job['scan_id']}\n"
+            
+            if job.get("error_message"):
+                info += f"[bold]Error:[/bold] [red]{job['error_message']}[/red]\n"
+            
+            if job.get("created_at"):
+                info += f"[bold]Created:[/bold] {job['created_at'][:19].replace('T', ' ')}\n"
+            if job.get("started_at"):
+                info += f"[bold]Started:[/bold] {job['started_at'][:19].replace('T', ' ')}\n"
+            if job.get("completed_at"):
+                info += f"[bold]Completed:[/bold] {job['completed_at'][:19].replace('T', ' ')}\n"
+            
+            console.print(Panel(info, title="Job Details", box=box.ROUNDED))
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Job operation failed: {e}[/red]")
         sys.exit(1)
 
 

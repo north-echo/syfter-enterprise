@@ -65,6 +65,12 @@ def check_syft_installed() -> str:
             return "unknown"
 
 
+# Note: We tried using syft's --exclude patterns to filter debug packages at scan time,
+# but they don't work reliably for RPM directory scans. Instead, we filter debug packages
+# in modify_sbom() after the scan completes. This is actually faster since syft doesn't
+# have to evaluate exclusion patterns for every file.
+
+
 def scan_target(
     target: str,
     output_format: str = "syft-json",
@@ -73,6 +79,7 @@ def scan_target(
     show_progress: bool = True,
     name: Optional[str] = None,
     version: Optional[str] = None,
+    exclude_debug: bool = True,
 ) -> dict:
     """
     Run syft against a target and return the SBOM as a dictionary.
@@ -85,6 +92,7 @@ def scan_target(
         show_progress: Whether to show syft's progress output (default: True)
         name: Optional name for the source (avoids syft warning)
         version: Optional version for the source (avoids syft warning)
+        exclude_debug: Whether to exclude debuginfo/debugsource packages (default: True)
 
     Returns:
         dict: Parsed SBOM JSON
@@ -108,9 +116,20 @@ def scan_target(
         cmd.extend(["--source-version", version])
 
     # Add catalogers if specified
+    # Use --override-default-catalogers to explicitly use only the catalogers we want
     if catalogers:
-        for cataloger in catalogers:
-            cmd.extend(["--catalogers", cataloger])
+        # Use exact cataloger names (e.g., "rpm-db-cataloger" for RPMs)
+        cataloger_names = []
+        for c in catalogers:
+            if c == "rpm":
+                # RPM cataloger for scanning RPM files
+                cataloger_names.append("rpm-archive-cataloger")
+            else:
+                cataloger_names.append(c)
+        cmd.extend(["--override-default-catalogers", ",".join(cataloger_names)])
+
+    # Note: exclude_debug parameter is kept for API compatibility but syft's --exclude
+    # doesn't work reliably for RPM scans. Debug filtering happens in modify_sbom() instead.
 
     # Add extra arguments
     if extra_args:
@@ -159,6 +178,7 @@ def scan_directory(
     show_progress: bool = True,
     name: Optional[str] = None,
     version: Optional[str] = None,
+    exclude_debug: bool = True,
 ) -> tuple[dict, str]:
     """
     Scan a directory of packages (typically RPMs).
@@ -169,6 +189,7 @@ def scan_directory(
         show_progress: Whether to show syft's progress output
         name: Optional name for the source
         version: Optional version for the source
+        exclude_debug: Whether to exclude debuginfo/debugsource packages (default: True)
 
     Returns:
         tuple: (SBOM dict, syft version string)
@@ -185,7 +206,12 @@ def scan_directory(
         rpm_files = list(directory.glob("**/*.rpm"))
         if rpm_files:
             catalogers = ["rpm"]
-            console.print(f"[green]Found {len(rpm_files)} RPM files[/green]")
+            # Count non-debug RPMs for display
+            if exclude_debug:
+                non_debug = [f for f in rpm_files if "-debuginfo-" not in f.name and "-debugsource-" not in f.name]
+                console.print(f"[green]Found {len(rpm_files)} RPM files ({len(non_debug)} non-debug)[/green]")
+            else:
+                console.print(f"[green]Found {len(rpm_files)} RPM files[/green]")
 
     # Use dir: scheme for directory scanning
     target = f"dir:{directory}"
@@ -196,6 +222,7 @@ def scan_directory(
         show_progress=show_progress,
         name=name,
         version=version,
+        exclude_debug=exclude_debug,
     )
 
 
@@ -207,6 +234,7 @@ def scan_container(
     show_progress: bool = True,
     name: Optional[str] = None,
     version: Optional[str] = None,
+    exclude_debug: bool = True,
 ) -> tuple[dict, str]:
     """
     Scan a container image.
@@ -221,23 +249,24 @@ def scan_container(
         show_progress: Whether to show syft's progress output
         name: Optional name for the source
         version: Optional version for the source
+        exclude_debug: Whether to exclude debuginfo/debugsource packages (default: True)
 
     Returns:
         tuple: (SBOM dict, syft version string)
     """
     # If image already has a scheme, use as-is
     if any(image.startswith(f"{s}:") for s in ["podman", "docker", "registry", "oci-dir", "oci-archive", "docker-archive"]):
-        return scan_target(image, show_progress=show_progress, name=name, version=version)
+        return scan_target(image, show_progress=show_progress, name=name, version=version, exclude_debug=exclude_debug)
 
     # If pull_first is set, use skopeo to pull to OCI dir first
     if pull_first or source == "skopeo":
-        return _scan_via_skopeo(image, arch=arch, show_progress=show_progress, name=name, version=version)
+        return _scan_via_skopeo(image, arch=arch, show_progress=show_progress, name=name, version=version, exclude_debug=exclude_debug)
 
     # If source explicitly specified, use it
     if source:
         target = f"{source}:{image}"
         console.print(f"[dim]Using source: {source}[/dim]")
-        return scan_target(target, show_progress=show_progress, name=name, version=version)
+        return scan_target(target, show_progress=show_progress, name=name, version=version, exclude_debug=exclude_debug)
 
     # Auto-detect: try registry first (most reliable), then skopeo
     # The 'registry:' source in syft pulls directly from OCI registry
@@ -246,12 +275,12 @@ def scan_container(
     target = f"registry:{image}"
 
     try:
-        return scan_target(target, show_progress=show_progress, name=name, version=version)
+        return scan_target(target, show_progress=show_progress, name=name, version=version, exclude_debug=exclude_debug)
     except ScanError as e:
         # If registry pull fails, try skopeo as fallback
         if shutil.which("skopeo"):
             console.print("[yellow]Registry pull failed, trying skopeo...[/yellow]")
-            return _scan_via_skopeo(image, arch=arch, show_progress=show_progress, name=name, version=version)
+            return _scan_via_skopeo(image, arch=arch, show_progress=show_progress, name=name, version=version, exclude_debug=exclude_debug)
         raise
 
 
@@ -261,6 +290,7 @@ def _scan_via_skopeo(
     show_progress: bool = True,
     name: Optional[str] = None,
     version: Optional[str] = None,
+    exclude_debug: bool = True,
 ) -> tuple[dict, str]:
     """
     Pull image using skopeo to OCI directory, then scan.
@@ -274,6 +304,7 @@ def _scan_via_skopeo(
         show_progress: Whether to show syft's progress output
         name: Optional name for the source
         version: Optional version for the source
+        exclude_debug: Whether to exclude debuginfo/debugsource packages (default: True)
 
     Returns:
         tuple: (SBOM dict, syft version string)
@@ -330,7 +361,7 @@ def _scan_via_skopeo(
     # Scan the OCI directory
     target = f"oci-dir:{oci_path}"
     try:
-        result = scan_target(target, show_progress=show_progress, name=name, version=version)
+        result = scan_target(target, show_progress=show_progress, name=name, version=version, exclude_debug=exclude_debug)
     finally:
         # Cleanup after scan
         shutil.rmtree(tmpdir, ignore_errors=True)
