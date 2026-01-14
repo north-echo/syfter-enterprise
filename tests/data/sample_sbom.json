@@ -1,0 +1,138 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anchore/syft/main/schema/json/schema-16.0.16.json",
+  "artifacts": [
+    {
+      "id": "a1b2c3d4",
+      "name": "bash",
+      "version": "5.1.8-9.el9",
+      "type": "rpm",
+      "foundBy": "rpm-db-cataloger",
+      "locations": [
+        {
+          "path": "/var/lib/rpm/Packages"
+        }
+      ],
+      "licenses": [
+        {
+          "value": "GPL-3.0-or-later",
+          "spdxExpression": "GPL-3.0-or-later",
+          "type": "declared"
+        }
+      ],
+      "language": "",
+      "cpes": [
+        "cpe:2.3:a:*:bash:5.1.8-9.el9:*:*:*:*:*:*:*"
+      ],
+      "purl": "pkg:rpm/rhel/bash@5.1.8-9.el9?arch=x86_64",
+      "metadata": {
+        "name": "bash",
+        "version": "5.1.8",
+        "release": "9.el9",
+        "arch": "x86_64",
+        "epoch": 0,
+        "sourceRpm": "bash-5.1.8-9.el9.src.rpm",
+        "size": 8293440,
+        "vendor": "Red Hat, Inc.",
+        "files": [
+          {"path": "/usr/bin/bash", "digest": {"algorithm": "sha256", "value": "abc123"}},
+          {"path": "/usr/bin/sh", "digest": {"algorithm": "sha256", "value": "abc123"}}
+        ]
+      }
+    },
+    {
+      "id": "e5f6g7h8",
+      "name": "openssl",
+      "version": "3.0.7-27.el9",
+      "type": "rpm",
+      "foundBy": "rpm-db-cataloger",
+      "locations": [
+        {
+          "path": "/var/lib/rpm/Packages"
+        }
+      ],
+      "licenses": [
+        {
+          "value": "Apache-2.0",
+          "spdxExpression": "Apache-2.0",
+          "type": "declared"
+        }
+      ],
+      "language": "",
+      "cpes": [
+        "cpe:2.3:a:*:openssl:3.0.7-27.el9:*:*:*:*:*:*:*"
+      ],
+      "purl": "pkg:rpm/rhel/openssl@3.0.7-27.el9?arch=x86_64",
+      "metadata": {
+        "name": "openssl",
+        "version": "3.0.7",
+        "release": "27.el9",
+        "arch": "x86_64",
+        "epoch": 1,
+        "sourceRpm": "openssl-3.0.7-27.el9.src.rpm",
+        "size": 1843200,
+        "vendor": "Red Hat, Inc.",
+        "files": [
+          {"path": "/usr/bin/openssl", "digest": {"algorithm": "sha256", "value": "def456"}},
+          {"path": "/usr/lib64/libssl.so.3", "digest": {"algorithm": "sha256", "value": "ghi789"}}
+        ]
+      }
+    },
+    {
+      "id": "i9j0k1l2",
+      "name": "curl",
+      "version": "7.76.1-29.el9",
+      "type": "rpm",
+      "foundBy": "rpm-db-cataloger",
+      "locations": [
+        {
+          "path": "/var/lib/rpm/Packages"
+        }
+      ],
+      "licenses": [
+        {
+          "value": "MIT",
+          "spdxExpression": "MIT",
+          "type": "declared"
+        }
+      ],
+      "language": "",
+      "cpes": [
+        "cpe:2.3:a:*:curl:7.76.1-29.el9:*:*:*:*:*:*:*"
+      ],
+      "purl": "pkg:rpm/rhel/curl@7.76.1-29.el9?arch=x86_64",
+      "metadata": {
+        "name": "curl",
+        "version": "7.76.1",
+        "release": "29.el9",
+        "arch": "x86_64",
+        "epoch": 0,
+        "sourceRpm": "curl-7.76.1-29.el9.src.rpm",
+        "size": 521600,
+        "vendor": "Red Hat, Inc.",
+        "files": [
+          {"path": "/usr/bin/curl", "digest": {"algorithm": "sha256", "value": "jkl012"}}
+        ]
+      }
+    }
+  ],
+  "artifactRelationships": [],
+  "files": [],
+  "source": {
+    "id": "test-source",
+    "type": "directory",
+    "target": "/test/path"
+  },
+  "distro": {
+    "name": "rhel",
+    "version": "9.0",
+    "idLike": ["fedora"]
+  },
+  "descriptor": {
+    "name": "syft",
+    "version": "1.0.0"
+  },
+  "schema": {
+    "version": "16.0.16",
+    "url": "https://raw.githubusercontent.com/anchore/syft/main/schema/json/schema-16.0.16.json"
+  }
+}

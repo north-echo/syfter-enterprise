@@ -1,0 +1,104 @@
+# Docker Compose for testing - runs on different ports to avoid conflicts
+# Usage: podman-compose -f docker-compose.test.yml up -d
+#
+# Services run on:
+#   API: 18000 (instead of 8000)
+#   PostgreSQL: 15432 (instead of 5432)
+#   MinIO: 19000/19001 (instead of 9000/9001)
+
+version: '3.8'
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    container_name: syfter-postgres-test
+    environment:
+      POSTGRES_USER: syfter_test
+      POSTGRES_PASSWORD: syfter_test_secret
+      POSTGRES_DB: syfter_test
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    ports:
+      - "15432:5432"
+    command:
+      - "postgres"
+      - "-c" 
+      - "max_wal_size=1GB"
+      - "-c"
+      - "shared_buffers=256MB"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U syfter_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio-test:
+    image: minio/minio:latest
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    container_name: syfter-minio-test
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: testadmin
+      MINIO_ROOT_PASSWORD: testadmin123
+    volumes:
+      - minio_test_data:/data
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  api-test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      platforms:
+        - ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    container_name: syfter-api-test
+    environment:
+      SYFTER_DB_TYPE: postgresql
+      SYFTER_PG_HOST: postgres-test
+      SYFTER_PG_PORT: 5432
+      SYFTER_PG_DATABASE: syfter_test
+      SYFTER_PG_USER: syfter_test
+      SYFTER_PG_PASSWORD: syfter_test_secret
+      SYFTER_STORAGE_TYPE: s3
+      SYFTER_S3_ENDPOINT: http://minio-test:9000
+      SYFTER_S3_EXTERNAL_ENDPOINT: http://localhost:19000
+      SYFTER_S3_BUCKET: syfter-test-sboms
+      SYFTER_S3_ACCESS_KEY: testadmin
+      SYFTER_S3_SECRET_KEY: testadmin123
+      SYFTER_S3_USE_SSL: "false"
+      SYFTER_HOST: 0.0.0.0
+      SYFTER_PORT: 8000
+      SYFTER_WORKERS: 1
+    ports:
+      - "18000:8000"
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      minio-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 512M
+
+volumes:
+  postgres_test_data:
+  minio_test_data:
