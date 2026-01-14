@@ -91,6 +91,7 @@ class Storage:
                     modified_sbom BLOB NOT NULL,
                     package_count INTEGER DEFAULT 0,
                     file_count INTEGER DEFAULT 0,
+                    image_layers_json TEXT,
                     FOREIGN KEY (product_id) REFERENCES products(id)
                 )
             """)
@@ -110,6 +111,9 @@ class Storage:
                     license TEXT,
                     purl TEXT,
                     cpes TEXT,
+                    layer_id TEXT,
+                    layer_index INTEGER,
+                    source_image TEXT,
                     FOREIGN KEY (scan_id) REFERENCES scans(id) ON DELETE CASCADE,
                     FOREIGN KEY (product_id) REFERENCES products(id)
                 )
@@ -203,6 +207,7 @@ class Storage:
         original_sbom: dict,
         modified_sbom: dict,
         packages: list[dict],
+        image_layers: Optional[list[dict]] = None,
     ) -> int:
         """
         Store a scan result with indexed package data.
@@ -217,6 +222,7 @@ class Storage:
             original_sbom: Original syft-json SBOM
             modified_sbom: Modified SBOM with product metadata
             packages: List of extracted package dictionaries
+            image_layers: Optional list of container layer info
 
         Returns:
             int: Scan ID
@@ -251,12 +257,17 @@ class Storage:
                 f"modified {len(modified_sbom_compressed) / 1024 / 1024:.1f}MB[/dim]"
             )
 
+            # Serialize image layers to JSON if provided
+            image_layers_json_str = None
+            if image_layers:
+                image_layers_json_str = json.dumps(image_layers)
+
             # Insert scan record
             cursor.execute(
                 """
                 INSERT INTO scans (product_id, source_path, source_type, syft_version,
-                                   original_sbom, modified_sbom, package_count, file_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                   original_sbom, modified_sbom, package_count, file_count, image_layers_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     product_id,
@@ -267,6 +278,7 @@ class Storage:
                     modified_sbom_compressed,
                     len(packages),
                     file_count,
+                    image_layers_json_str,
                 ),
             )
             scan_id = cursor.lastrowid
@@ -276,8 +288,9 @@ class Storage:
                 cursor.execute(
                     """
                     INSERT INTO packages (scan_id, product_id, name, version, release,
-                                         arch, epoch, source_rpm, license, purl, cpes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         arch, epoch, source_rpm, license, purl, cpes,
+                                         layer_id, layer_index, source_image)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         scan_id,
@@ -291,6 +304,9 @@ class Storage:
                         pkg.get("license", ""),
                         pkg.get("purl", ""),
                         pkg.get("cpes", "[]"),
+                        pkg.get("layer_id"),
+                        pkg.get("layer_index"),
+                        pkg.get("source_image"),
                     ),
                 )
                 package_id = cursor.lastrowid
@@ -345,6 +361,40 @@ class Storage:
             row = cursor.fetchone()
             if row:
                 return _decompress_json(row["modified_sbom"])
+            return None
+
+    def get_product_layers(self, product_name: str, product_version: str) -> Optional[list[dict]]:
+        """
+        Get the container layer chain for a product.
+
+        Args:
+            product_name: Product name
+            product_version: Product version
+
+        Returns:
+            list: Layer chain info or None if not a container scan
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT s.image_layers_json, s.source_path, s.source_type
+                FROM scans s
+                JOIN products p ON s.product_id = p.id
+                WHERE p.name = ? AND p.version = ?
+                ORDER BY s.scan_timestamp DESC
+                LIMIT 1
+                """,
+                (product_name, product_version),
+            )
+            row = cursor.fetchone()
+            if row and row["image_layers_json"]:
+                layers = json.loads(row["image_layers_json"])
+                return {
+                    "layers": layers,
+                    "source_path": row["source_path"],
+                    "source_type": row["source_type"],
+                }
             return None
 
     def get_all_product_sboms(self, product_name: str, product_version: str) -> list[dict]:

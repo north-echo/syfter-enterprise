@@ -30,11 +30,20 @@ from .scanner import (
     get_source_type,
     get_host_info,
     get_remote_host_info,
+    get_container_layer_info,
+    get_package_source_images,
     check_syft_installed,
     SyftNotFoundError,
     ScanError,
 )
-from .manipulator import modify_sbom, extract_packages
+from .manipulator import (
+    modify_sbom,
+    extract_packages,
+    extract_image_layers,
+    build_layer_map,
+    parse_containerfile,
+    map_layers_to_images,
+)
 from .exporter import (
     export_to_spdx_json,
     export_to_spdx_tv,
@@ -104,6 +113,8 @@ def main(ctx, server_url: Optional[str], force_local: bool):
 @click.option("-q", "--quiet", is_flag=True, help="Suppress progress output")
 @click.option("--skip-files", is_flag=True, help="Skip file indexing (faster, uses less memory)")
 @click.option("--include-debug", is_flag=True, help="Include debuginfo/debugsource packages (excluded by default)")
+@click.option("--containerfile", type=click.Path(exists=True), help="Path to Containerfile to extract base image chain")
+@click.option("--base-image", multiple=True, help="Base image reference(s) for layer mapping (repeatable)")
 @click.pass_context
 def scan(
     ctx,
@@ -122,6 +133,8 @@ def scan(
     quiet: bool,
     skip_files: bool,
     include_debug: bool,
+    containerfile: Optional[str],
+    base_image: tuple,
 ):
     """Scan a target and store the SBOM with product metadata."""
     try:
@@ -175,7 +188,110 @@ def scan(
         sys.exit(1)
 
     modified_sbom = modify_sbom(original_sbom, prod, exclude_debug=not include_debug)
-    packages = extract_packages(modified_sbom, skip_files=skip_files)
+    
+    # Extract layer information for container scans
+    layer_map = None
+    image_layers = []
+    if source_type == "container":
+        image_layers = extract_image_layers(modified_sbom)
+        if image_layers:
+            console.print(f"[dim]Found {len(image_layers)} container layers[/dim]")
+            layer_map = build_layer_map(image_layers)
+            
+            # Get source image mapping and complete layer chain from container metadata
+            clean_target = target
+            for prefix in ["docker:", "podman:", "registry:", "oci-dir:", "oci-archive:"]:
+                if clean_target.startswith(prefix):
+                    clean_target = clean_target[len(prefix):]
+                    break
+            
+            source_image_map, layer_chain = get_container_layer_info(clean_target, arch=arch or "amd64")
+            
+            # Store the complete layer chain for the 'layers' command
+            if layer_chain:
+                # Update image_layers with the full chain info
+                image_layers = layer_chain
+            
+            # Merge source image info into layer_map
+            if source_image_map:
+                for layer_id, layer_info in layer_map.items():
+                    if layer_id in source_image_map:
+                        layer_info["source_image"] = source_image_map[layer_id]
+            
+            # If user provided Containerfile, use that as override
+            if containerfile:
+                parsed_images = parse_containerfile(containerfile)
+                if parsed_images:
+                    console.print(f"[dim]Parsed FROM chain from Containerfile: {' -> '.join(parsed_images)}[/dim]")
+    
+    packages = extract_packages(modified_sbom, skip_files=skip_files, layer_map=layer_map)
+    
+    # Count packages with layer info
+    if layer_map:
+        pkgs_with_layers = sum(1 for p in packages if p.get("layer_id"))
+        console.print(f"[dim]Packages with layer info: {pkgs_with_layers}/{len(packages)}[/dim]")
+        
+        # For RPM-based containers, determine true package provenance by scanning base images
+        # This is necessary because RPM packages all appear in the top layer (where rpmdb lives)
+        if pkgs_with_layers > 0 and not containerfile:
+            # Try to determine package sources by scanning base images
+            clean_target = target
+            for prefix in ["docker:", "podman:", "registry:", "oci-dir:", "oci-archive:"]:
+                if clean_target.startswith(prefix):
+                    clean_target = clean_target[len(prefix):]
+                    break
+            
+            pkg_sources, verified_chain = get_package_source_images(clean_target, packages, arch=arch or "amd64")
+            if pkg_sources:
+                # Update packages with source image info
+                for pkg in packages:
+                    pkg_name = pkg.get("name")
+                    if pkg_name and pkg_name in pkg_sources:
+                        source_info = pkg_sources[pkg_name]
+                        pkg["source_image"] = source_info.get("name")
+                        pkg["source_image_ref"] = source_info.get("full_reference")
+                
+                sources_filled = sum(1 for p in packages if p.get("source_image"))
+                console.print(f"[green]Packages with source image: {sources_filled}/{len(packages)}[/green]")
+            
+            # Update image_layers with verified chain info
+            if verified_chain:
+                # Rebuild image_layers with accurate info from verified chain
+                target_meta = verified_chain[-1] if verified_chain else {}
+                target_layers = target_meta.get("layers", [])
+                
+                # Map each layer to the image that introduced it
+                # Layer at index N was introduced by the first image in the chain
+                # (sorted by layer count) whose layer count is > N
+                new_image_layers = []
+                for idx, layer_digest in enumerate(target_layers):
+                    if layer_digest.startswith("sha256:"):
+                        layer_id = layer_digest[7:20]
+                    else:
+                        layer_id = layer_digest[:13]
+                    
+                    # Find which image introduced this layer
+                    # It's the first image in the chain whose layer count > idx
+                    source_img = None
+                    for img_info in verified_chain:
+                        img_layer_count = img_info.get("layer_count", 0)
+                        if img_layer_count > idx:
+                            source_img = img_info
+                            break
+                    
+                    if source_img:
+                        new_image_layers.append({
+                            "layer_index": idx,
+                            "layer_id": layer_id,
+                            "full_digest": layer_digest,
+                            "source_image": source_img.get("name"),
+                            "source_version": source_img.get("version"),
+                            "source_release": source_img.get("release"),
+                            "image_reference": source_img.get("full_reference"),
+                        })
+                
+                if new_image_layers:
+                    image_layers = new_image_layers
     
     if skip_files:
         console.print("[yellow]Note: File indexing skipped (--skip-files). File search won't work for this scan.[/yellow]")
@@ -189,12 +305,12 @@ def scan(
         return
 
     if ctx.obj["local_mode"]:
-        _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages)
+        _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers)
     else:
-        _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages)
+        _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers)
 
 
-def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages):
+def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers=None):
     """Store scan using local SQLite storage."""
     from .storage import Storage
 
@@ -208,11 +324,12 @@ def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, mo
         original_sbom=original_sbom,
         modified_sbom=modified_sbom,
         packages=packages,
+        image_layers=image_layers,
     )
     console.print(f"[green]✓ Scan #{scan_id} stored locally[/green]")
 
 
-def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages):
+def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers=None):
     """Store scan using API server with async job-based flow."""
     from .client import SyfterClient, APIError
     import httpx
@@ -230,6 +347,7 @@ def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, m
                 original_sbom=original_sbom,
                 modified_sbom=modified_sbom,
                 packages=packages,
+                image_layers=image_layers,
             )
             scan_id = result.get("scan_id", "unknown")
             console.print(f"[green]✓ Scan #{scan_id} uploaded to server (job: {result['id']})[/green]")
@@ -280,11 +398,19 @@ def _query_local(name, file_path, digest, product, product_version, limit, outpu
         table.add_column("Path", style="cyan")
         table.add_column("Package", style="green")
         table.add_column("Product", style="magenta")
+        # Only show source_image column if any result has it
+        has_source_image = any(row.get('source_image') for row in results)
+        if has_source_image:
+            table.add_column("Source Image", style="yellow")
         for row in results:
             pkg_info = row['package_name']
             if row.get('package_version'):
                 pkg_info += f"-{row['package_version']}"
-            table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
+            if has_source_image:
+                table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}", 
+                            row.get('source_image') or "")
+            else:
+                table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
         console.print(table)
 
     elif name:
@@ -301,8 +427,16 @@ def _query_local(name, file_path, digest, product, product_version, limit, outpu
         table.add_column("Name", style="cyan")
         table.add_column("Version", style="green")
         table.add_column("Product", style="magenta")
+        # Only show source_image column if any result has it
+        has_source_image = any(row.get('source_image') for row in results)
+        if has_source_image:
+            table.add_column("Source Image", style="yellow")
         for row in results:
-            table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
+            if has_source_image:
+                table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}",
+                            row.get('source_image') or "")
+            else:
+                table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
         console.print(table)
     else:
         console.print("[yellow]Please specify --name, --file, or --digest[/yellow]")
@@ -331,11 +465,19 @@ def _query_server(ctx, name, file_path, digest, product, product_version, limit,
                 table.add_column("Path", style="cyan")
                 table.add_column("Package", style="green")
                 table.add_column("Product", style="magenta")
+                # Only show source_image column if any result has it
+                has_source_image = any(row.get('source_image') for row in results)
+                if has_source_image:
+                    table.add_column("Source Image", style="yellow")
                 for row in results:
                     pkg_info = row['package_name']
                     if row.get('package_version'):
                         pkg_info += f"-{row['package_version']}"
-                    table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
+                    if has_source_image:
+                        table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}",
+                                    row.get('source_image') or "")
+                    else:
+                        table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
                 console.print(table)
 
             elif name:
@@ -352,8 +494,16 @@ def _query_server(ctx, name, file_path, digest, product, product_version, limit,
                 table.add_column("Name", style="cyan")
                 table.add_column("Version", style="green")
                 table.add_column("Product", style="magenta")
+                # Only show source_image column if any result has it
+                has_source_image = any(row.get('source_image') for row in results)
+                if has_source_image:
+                    table.add_column("Source Image", style="yellow")
                 for row in results:
-                    table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
+                    if has_source_image:
+                        table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}",
+                                    row.get('source_image') or "")
+                    else:
+                        table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
                 console.print(table)
             else:
                 console.print("[yellow]Please specify --name, --file, or --digest[/yellow]")
@@ -718,6 +868,126 @@ def _list_server(ctx, product, product_version, list_type, full):
     except APIError as e:
         console.print(f"[red]List failed: {e}[/red]")
         sys.exit(1)
+
+
+@main.command("layers")
+@click.option("-p", "--product", required=True, help="Product name")
+@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def show_layers(ctx, product, product_version, output_json):
+    """
+    Show container layers for a product.
+    
+    Displays the layer chain for a container image, showing which source
+    image contributed each layer. Only available for container scans.
+    
+    Examples:
+    
+        rh-syfter layers -p go-toolset -v 1.25
+        
+        rh-syfter layers -p go-toolset -v 1.25 --json
+    """
+    if ctx.obj["local_mode"]:
+        _layers_local(product, product_version, output_json)
+    else:
+        _layers_server(ctx, product, product_version, output_json)
+
+
+def _layers_local(product, product_version, output_json):
+    """Show layers using local storage."""
+    from .storage import Storage
+    
+    storage = Storage()
+    result = storage.get_product_layers(product, product_version)
+    
+    if not result:
+        console.print(f"[yellow]No layer information found for {product}-{product_version}[/yellow]")
+        console.print("[dim]Layer info is only available for container scans.[/dim]")
+        return
+    
+    _display_layers(result, output_json)
+
+
+def _layers_server(ctx, product, product_version, output_json):
+    """Show layers using server."""
+    from .client import SyfterClient, APIError
+    import httpx
+    
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            result = client.get_product_layers(product, product_version)
+            
+            if not result:
+                console.print(f"[yellow]No layer information found for {product}-{product_version}[/yellow]")
+                console.print("[dim]Layer info is only available for container scans.[/dim]")
+                return
+            
+            _display_layers(result, output_json)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        if "404" in str(e):
+            console.print(f"[yellow]No layer information found for {product}-{product_version}[/yellow]")
+            console.print("[dim]Layer info is only available for container scans.[/dim]")
+        else:
+            console.print(f"[red]Failed to get layers: {e}[/red]")
+        sys.exit(1)
+
+
+def _display_layers(result, output_json):
+    """Display layer information."""
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    
+    layers = result.get("layers", [])
+    source_path = result.get("source_path", "unknown")
+    
+    console.print(Panel(
+        f"[bold]Container:[/bold] {source_path}\n"
+        f"[bold]Layers:[/bold] {len(layers)}",
+        title="Container Layer Chain",
+        box=box.ROUNDED,
+    ))
+    
+    table = Table(box=box.SIMPLE)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Layer ID", style="cyan", width=15)
+    table.add_column("Source Image", style="green")
+    table.add_column("Version", style="yellow")
+    table.add_column("Image Reference (copy/paste)", style="magenta")
+    
+    for layer in layers:
+        idx = layer.get("layer_index", 0)
+        layer_id = layer.get("layer_id", "")
+        source_image = layer.get("source_image") or "(unknown)"
+        source_version = layer.get("source_version") or ""
+        image_ref = layer.get("image_reference") or ""
+        
+        table.add_row(
+            str(idx),
+            layer_id,
+            source_image,
+            source_version,
+            image_ref,
+        )
+    
+    console.print(table)
+    
+    # Print summary
+    unique_images = set(l.get("source_image") for l in layers if l.get("source_image"))
+    console.print()
+    console.print(f"[dim]Unique source images: {len(unique_images)}[/dim]")
+    for img in sorted(unique_images):
+        # Find the reference for this image
+        ref = next((l.get("image_reference") for l in layers if l.get("source_image") == img), None)
+        if ref:
+            console.print(f"[dim]  • {img} -> [cyan]{ref}[/cyan][/dim]")
+        else:
+            console.print(f"[dim]  • {img}[/dim]")
 
 
 @main.command("job")

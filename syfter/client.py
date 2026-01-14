@@ -43,7 +43,8 @@ def build_tsv_files(packages: list) -> Tuple[bytes, bytes, int, int]:
     file_count = 0
     
     for pkg in packages:
-        # Package TSV: name, version, release, arch, epoch, source_rpm, license, purl, cpes
+        # Package TSV: name, version, release, arch, epoch, source_rpm, license, purl, cpes, layer_id, layer_index, source_image
+        layer_index = pkg.get("layer_index")
         pkg_fields = [
             pkg.get("name", "") or "",
             pkg.get("version") or "\\N",
@@ -54,6 +55,9 @@ def build_tsv_files(packages: list) -> Tuple[bytes, bytes, int, int]:
             pkg.get("license") or "\\N",
             pkg.get("purl") or "\\N",
             pkg.get("cpes") or "\\N",
+            pkg.get("layer_id") or "\\N",
+            str(layer_index) if layer_index is not None else "\\N",
+            pkg.get("source_image") or "\\N",
         ]
         # Escape tabs and newlines in fields
         pkg_fields = [f.replace("\t", " ").replace("\n", " ").replace("\r", "") for f in pkg_fields]
@@ -176,6 +180,13 @@ class SyfterClient:
         response = self.client.get(self._url("/scans/"), params=params)
         return self._handle_response(response)
 
+    def get_product_layers(self, product_name: str, product_version: str) -> Optional[dict]:
+        """Get container layer chain for a product."""
+        response = self.client.get(self._url(f"/products/{product_name}/{product_version}/layers"))
+        if response.status_code == 404:
+            return None
+        return self._handle_response(response)
+
     def upload_scan(
         self,
         product_name: str,
@@ -283,6 +294,7 @@ class SyfterClient:
         original_sbom: dict,
         modified_sbom: dict,
         packages: list,
+        image_layers: Optional[List] = None,
         poll_interval: float = 5.0,
     ) -> dict:
         """
@@ -307,6 +319,7 @@ class SyfterClient:
             original_sbom: Original syft-json SBOM dict
             modified_sbom: Modified SBOM dict
             packages: List of package dicts for indexing
+            image_layers: Optional list of container layer info
             poll_interval: Seconds between status polls
             
         Returns:
@@ -331,6 +344,7 @@ class SyfterClient:
             syft_version=syft_version,
             total_packages=total_packages,
             total_files=total_files,
+            image_layers=image_layers,
         )
         job_id = job_response["job_id"]
         console.print(f"[dim]Job created: {job_id}[/dim]")
@@ -413,19 +427,24 @@ class SyfterClient:
         syft_version: Optional[str],
         total_packages: int,
         total_files: int,
+        image_layers: Optional[List] = None,
     ) -> dict:
         """Create a new import job."""
+        payload = {
+            "product_name": product_name,
+            "product_version": product_version,
+            "source_path": source_path,
+            "source_type": source_type,
+            "syft_version": syft_version or "",
+            "total_packages": total_packages,
+            "total_files": total_files,
+        }
+        if image_layers:
+            payload["image_layers_json"] = json.dumps(image_layers)
+        
         response = self.client.post(
             self._url("/jobs"),
-            json={
-                "product_name": product_name,
-                "product_version": product_version,
-                "source_path": source_path,
-                "source_type": source_type,
-                "syft_version": syft_version or "",
-                "total_packages": total_packages,
-                "total_files": total_files,
-            },
+            json=payload,
         )
         return self._handle_response(response)
     

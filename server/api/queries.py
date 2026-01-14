@@ -93,6 +93,9 @@ def search_packages(
             cpes=pkg.cpes,
             product_name=pname,
             product_version=pversion,
+            layer_id=pkg.layer_id,
+            layer_index=pkg.layer_index,
+            source_image=pkg.source_image,
         )
         for pkg, pname, pversion in results
     ]
@@ -110,7 +113,7 @@ def search_files(
 ):
     """Search for files across all products."""
     query = (
-        db.query(File, Package.name, Package.version, Product.name, Product.version)
+        db.query(File, Package.name, Package.version, Package.source_image, Product.name, Product.version)
         .join(Package, File.package_id == Package.id)
         .join(Product, File.product_id == Product.id)
     )
@@ -137,8 +140,9 @@ def search_files(
             package_version=pkg_version,
             product_name=prod_name,
             product_version=prod_version,
+            source_image=source_img,
         )
-        for f, pkg_name, pkg_version, prod_name, prod_version in results
+        for f, pkg_name, pkg_version, source_img, prod_name, prod_version in results
     ]
 
 

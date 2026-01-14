@@ -117,6 +117,44 @@ def create_product(product: ProductCreate, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/{product_name}/{product_version}/layers")
+def get_product_layers(product_name: str, product_version: str, db: Session = Depends(get_db)):
+    """Get container layer chain for a product (for container scans only)."""
+    import json
+    
+    product = (
+        db.query(Product)
+        .filter(Product.name == product_name, Product.version == product_version)
+        .first()
+    )
+
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # Get the latest scan with layer info
+    scan = (
+        db.query(Scan)
+        .filter(Scan.product_id == product.id)
+        .order_by(Scan.scan_timestamp.desc())
+        .first()
+    )
+
+    if not scan:
+        raise HTTPException(status_code=404, detail="No scans found for this product")
+
+    if not scan.image_layers_json:
+        raise HTTPException(status_code=404, detail="No layer information available (not a container scan)")
+
+    layers = json.loads(scan.image_layers_json)
+    return {
+        "product_name": product.name,
+        "product_version": product.version,
+        "source_path": scan.source_path,
+        "source_type": scan.source_type,
+        "layers": layers,
+    }
+
+
 @router.delete("/{product_name}/{product_version}", status_code=204)
 def delete_product(product_name: str, product_version: str, db: Session = Depends(get_db)):
     """Delete a product and all its scans."""

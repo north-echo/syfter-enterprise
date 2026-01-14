@@ -61,6 +61,7 @@ async def create_job(
         syft_version=job_data.syft_version,
         total_packages=job_data.total_packages,
         total_files=job_data.total_files,
+        image_layers_json=job_data.image_layers_json,
         original_sbom_key=original_sbom_key,
         modified_sbom_key=modified_sbom_key,
         packages_tsv_key=packages_tsv_key,
@@ -510,6 +511,7 @@ def process_job(job_id: str):
             file_count=job.total_files,
             original_size_bytes=original_size,
             modified_size_bytes=modified_size,
+            image_layers_json=job.image_layers_json,
         )
         db.add(scan)
         db.commit()
@@ -612,7 +614,8 @@ def _import_tsv_postgres(db, raw_conn, storage, job, scan, product, system):
             f,
             'packages',
             columns=('scan_id', 'product_id', 'system_id', 'name', 'version', 'release', 
-                     'arch', 'epoch', 'source_rpm', 'license', 'purl', 'cpes'),
+                     'arch', 'epoch', 'source_rpm', 'license', 'purl', 'cpes',
+                     'layer_id', 'layer_index', 'source_image'),
             null='\\N'
         )
     raw_conn.commit()
@@ -702,10 +705,16 @@ def _import_tsv_sqlite(db, raw_conn, storage, job, scan, product, system):
             parts = line.split('\t')
             # Convert \N to None
             parts = [None if p == '\\N' else p for p in parts]
+            # Handle layer_index conversion (should be int or None)
+            if len(parts) >= 11 and parts[10] is not None:
+                try:
+                    parts[10] = int(parts[10])
+                except (ValueError, TypeError):
+                    parts[10] = None
             cursor.execute(
                 """INSERT INTO packages 
-                   (scan_id, product_id, system_id, name, version, release, arch, epoch, source_rpm, license, purl, cpes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (scan_id, product_id, system_id, name, version, release, arch, epoch, source_rpm, license, purl, cpes, layer_id, layer_index, source_image)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (scan.id, product_id, system_id, *parts)
             )
             pkg_count += 1

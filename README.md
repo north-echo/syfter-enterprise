@@ -61,6 +61,40 @@ rh-syfter scan registry.redhat.io/rhel9:latest -p rhel -v 9.0
 rh-syfter scan docker:ubi9/ubi:latest -p ubi -v 9.0
 ```
 
+#### Container Layer Tracking
+
+When scanning container images, rh-syfter **automatically** determines which base image contributed each package. This helps identify where to fix vulnerabilities in multi-stage container builds.
+
+```bash
+# Scan a container image - base image scanning is automatic
+rh-syfter scan registry.redhat.io/rhel9/go-toolset:latest -p go-toolset -v 9.0
+
+# Query packages - shows source image for each package
+rh-syfter query -n "go%" -p go-toolset -v 9.0
+```
+
+Output shows which image each package came from:
+```
+  Name                    Version          Product          Source Image      
+ ──────────────────────────────────────────────────────────────────────────── 
+  bash                    5.1.8-9.el9      go-toolset-9.0   ubi9/ubi          
+  git                     2.47.3-1.el9_6   go-toolset-9.0   ubi9/s2i-base     
+  golang                  1.25.3-1.el9_7   go-toolset-9.0   rhel9/go-toolset  
+```
+
+**How it works:**
+1. Uses **layer digest comparison** to accurately identify the base image chain (e.g., `ubi9/ubi` → `ubi9/s2i-core` → `ubi9/s2i-base` → `rhel9/go-toolset`)
+2. Extracts exact image references from labels (e.g., `registry.redhat.io/ubi9/ubi:9.7-1767674301`)
+3. Scans each base image to build package lists
+4. Compares package lists to determine which image introduced each package
+5. Records `source_image` with each package in the database
+
+The `rh-syfter layers` command shows the complete layer chain with:
+- `layer_id`: The container layer digest (truncated)
+- `layer_index`: The position in the layer stack (0 = base layer)
+- `source_image`: The image that introduced this layer
+- `image_reference`: The full image reference (registry/name:version-release)
+
 ### 3. Query Packages
 
 ```bash
@@ -234,6 +268,24 @@ Options:
   -t, --type [files|packages]  What to list (default: files)
   --full                    Include architecture in package output
 ```
+
+### `rh-syfter layers`
+
+Display container layer chain for a product (container scans only).
+
+```
+Usage: rh-syfter layers [OPTIONS]
+
+Options:
+  -p, --product TEXT        Product name (required)
+  -v, --version TEXT        Product version (required)
+  --json                    Output as JSON
+```
+
+Shows the layer-by-layer breakdown of a container image, including:
+- Layer index and truncated digest
+- Source image name (e.g., `ubi9/ubi`, `rhel9/go-toolset`)
+- Version and full image reference for each layer
 
 ### `rh-syfter system-scan`
 
