@@ -3,6 +3,7 @@ Scan API endpoints.
 """
 
 import gzip
+import io
 import json
 import logging
 import time
@@ -22,6 +23,60 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Maximum decompressed size to prevent zip bombs (500MB)
+_MAX_DECOMPRESSED_SIZE = 500 * 1024 * 1024
+
+
+def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -> bytes:
+    """
+    Safely decompress gzip data with size limit to prevent decompression bombs.
+    """
+    decompressor = gzip.GzipFile(fileobj=io.BytesIO(data))
+    chunks = []
+    total_size = 0
+    
+    while True:
+        chunk = decompressor.read(1024 * 1024)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_size:
+            raise ValueError(
+                f"Decompressed data exceeds maximum size limit of {max_size // (1024*1024)}MB"
+            )
+        chunks.append(chunk)
+    
+    return b''.join(chunks)
+
+
+def _validate_sbom_json(data: bytes, name: str = "SBOM") -> dict:
+    """
+    Validate that compressed data is valid gzip JSON.
+    
+    Args:
+        data: Compressed gzip data
+        name: Name for error messages
+        
+    Returns:
+        Parsed JSON dict
+        
+    Raises:
+        HTTPException: If data is invalid
+    """
+    try:
+        decompressed = _safe_gzip_decompress(data)
+    except gzip.BadGzipFile:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}: not valid gzip data")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}: {e}")
+    
+    try:
+        return json.loads(decompressed.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}: not valid JSON - {e}")
+    except UnicodeDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid {name}: not valid UTF-8 - {e}")
 
 
 def _generate_storage_key(product_name: str, product_version: str, scan_id: int, suffix: str) -> str:
@@ -193,20 +248,29 @@ async def upload_scan(
     packages_data = await packages_json.read()
     logger.info(f"Files read: original={len(original_data)/1024/1024:.1f}MB, modified={len(modified_data)/1024/1024:.1f}MB, packages={len(packages_data)/1024:.1f}KB")
 
-    # Parse packages for indexing - use streaming to reduce memory
+    # Validate SBOM files are proper gzip JSON (quick validation, not full parsing)
+    # We validate the compressed data can be decompressed, but don't parse the full SBOM
+    # to avoid memory issues with large SBOMs
+    logger.info("Validating SBOM files...")
+    try:
+        # Quick validation - try to decompress first few bytes to check format
+        _safe_gzip_decompress(original_data[:1024*10] if len(original_data) > 1024*10 else original_data, max_size=_MAX_DECOMPRESSED_SIZE)
+        _safe_gzip_decompress(modified_data[:1024*10] if len(modified_data) > 1024*10 else modified_data, max_size=_MAX_DECOMPRESSED_SIZE)
+    except (gzip.BadGzipFile, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid SBOM file format: {e}")
+
+    # Parse packages for indexing - use streaming with size limit
     logger.info("Parsing packages JSON...")
     try:
-        import io
-        # Decompress in streaming fashion
-        with gzip.GzipFile(fileobj=io.BytesIO(packages_data)) as gz:
-            packages_json_str = gz.read().decode("utf-8")
+        # Decompress with size limit
+        packages_json_bytes = _safe_gzip_decompress(packages_data)
         # Free the compressed data immediately
         del packages_data
         
         # Parse JSON
-        packages_list = json.loads(packages_json_str)
-        # Free the JSON string immediately
-        del packages_json_str
+        packages_list = json.loads(packages_json_bytes.decode("utf-8"))
+        # Free the JSON bytes immediately
+        del packages_json_bytes
         
         import gc
         gc.collect()
@@ -214,6 +278,10 @@ async def upload_scan(
     except MemoryError:
         logger.error("Out of memory parsing packages JSON")
         raise HTTPException(status_code=507, detail="Server out of memory processing this upload. Try again or contact admin.")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Packages JSON too large: {e}")
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid packages JSON format: {e}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid packages JSON: {e}")
     

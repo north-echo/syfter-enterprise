@@ -26,6 +26,45 @@ from server.api.schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
+# Maximum decompressed size to prevent zip bombs (500MB)
+MAX_DECOMPRESSED_SIZE = 500 * 1024 * 1024
+
+
+def _safe_gzip_decompress(data: bytes, max_size: int = MAX_DECOMPRESSED_SIZE) -> bytes:
+    """
+    Safely decompress gzip data with size limit to prevent decompression bombs.
+    
+    Args:
+        data: Compressed gzip data
+        max_size: Maximum allowed decompressed size in bytes
+        
+    Returns:
+        Decompressed bytes
+        
+    Raises:
+        ValueError: If decompressed size exceeds limit
+    """
+    import gzip
+    import io
+    
+    decompressor = gzip.GzipFile(fileobj=io.BytesIO(data))
+    chunks = []
+    total_size = 0
+    
+    while True:
+        chunk = decompressor.read(1024 * 1024)  # Read 1MB at a time
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_size:
+            raise ValueError(
+                f"Decompressed data exceeds maximum size limit of {max_size // (1024*1024)}MB. "
+                "This may indicate a malicious file (zip bomb)."
+            )
+        chunks.append(chunk)
+    
+    return b''.join(chunks)
+
 
 @router.post("", response_model=JobUploadUrls)
 async def create_job(
@@ -589,114 +628,136 @@ def _import_tsv_postgres(db, raw_conn, storage, job, scan, product, system):
     product_id = product.id if product else "\\N"
     system_id = system.id if system else "\\N"
     
-    # Download and decompress packages TSV
-    logger.info("Downloading packages TSV...")
-    packages_data = storage.get(job.packages_tsv_key)
-    packages_tsv = gzip.decompress(packages_data).decode('utf-8')
+    # Track temp files for cleanup
+    pkg_tmp_path = None
+    files_tmp_path = None
     
-    # Write to temp file with scan_id, product_id, and system_id prepended
-    logger.info("Preparing packages for COPY...")
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
-        pkg_tmp_path = f.name
-        pkg_count = 0
-        for line in packages_tsv.strip().split('\n'):
-            if line:
-                # Prepend scan_id, product_id, system_id
-                f.write(f"{scan.id}\t{product_id}\t{system_id}\t{line}\n")
-                pkg_count += 1
-    
-    del packages_tsv
-    del packages_data
-    
-    logger.info(f"Importing {pkg_count} packages via COPY...")
-    with open(pkg_tmp_path, 'r') as f:
-        cursor.copy_from(
-            f,
-            'packages',
-            columns=('scan_id', 'product_id', 'system_id', 'name', 'version', 'release', 
-                     'arch', 'epoch', 'source_rpm', 'license', 'purl', 'cpes',
-                     'layer_id', 'layer_index', 'source_image'),
-            null='\\N'
+    try:
+        # Download and decompress packages TSV
+        logger.info("Downloading packages TSV...")
+        packages_data = storage.get(job.packages_tsv_key)
+        packages_tsv = _safe_gzip_decompress(packages_data).decode('utf-8')
+        
+        # Write to temp file with scan_id, product_id, and system_id prepended
+        logger.info("Preparing packages for COPY...")
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
+            pkg_tmp_path = f.name
+            pkg_count = 0
+            for line in packages_tsv.strip().split('\n'):
+                if line:
+                    # Prepend scan_id, product_id, system_id
+                    f.write(f"{scan.id}\t{product_id}\t{system_id}\t{line}\n")
+                    pkg_count += 1
+        
+        del packages_tsv
+        del packages_data
+        
+        logger.info(f"Importing {pkg_count} packages via COPY...")
+        with open(pkg_tmp_path, 'r') as f:
+            cursor.copy_from(
+                f,
+                'packages',
+                columns=('scan_id', 'product_id', 'system_id', 'name', 'version', 'release', 
+                         'arch', 'epoch', 'source_rpm', 'license', 'purl', 'cpes',
+                         'layer_id', 'layer_index', 'source_image'),
+                null='\\N'
+            )
+        raw_conn.commit()
+        
+        # Clean up packages temp file immediately after use
+        os.unlink(pkg_tmp_path)
+        pkg_tmp_path = None
+        
+        job.processed_packages = pkg_count
+        db.commit()
+        
+        # Get package ID mapping
+        logger.info("Building package ID mapping...")
+        cursor.execute(
+            "SELECT id, name, version, arch FROM packages WHERE scan_id = %s",
+            (scan.id,)
         )
-    raw_conn.commit()
-    os.unlink(pkg_tmp_path)
-    
-    job.processed_packages = pkg_count
-    db.commit()
-    
-    # Get package ID mapping
-    logger.info("Building package ID mapping...")
-    cursor.execute(
-        "SELECT id, name, version, arch FROM packages WHERE scan_id = %s",
-        (scan.id,)
-    )
-    pkg_id_map = {(row[1], row[2], row[3]): row[0] for row in cursor.fetchall()}
-    
-    # Check if files TSV exists
-    if not storage.exists(job.files_tsv_key):
-        logger.info("No files TSV found, skipping file import")
-        return
-    
-    # Download and decompress files TSV
-    logger.info("Downloading files TSV...")
-    files_data = storage.get(job.files_tsv_key)
-    files_tsv = gzip.decompress(files_data).decode('utf-8')
-    
-    # Write to temp file with IDs resolved
-    logger.info("Preparing files for COPY...")
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
-        files_tmp_path = f.name
-        file_count = 0
-        for line in files_tsv.strip().split('\n'):
-            if line:
-                parts = line.split('\t')
-                # TSV format: pkg_name, pkg_version, pkg_arch, path, digest, digest_algo
-                pkg_key = (parts[0], parts[1] if parts[1] != '\\N' else None, 
-                          parts[2] if parts[2] != '\\N' else None)
-                pkg_id = pkg_id_map.get(pkg_key)
-                if pkg_id:
-                    # Write: package_id, scan_id, product_id, system_id, path, digest, digest_algo
-                    f.write(f"{pkg_id}\t{scan.id}\t{product_id}\t{system_id}\t{parts[3]}\t{parts[4]}\t{parts[5]}\n")
-                    file_count += 1
-                    
-                    if file_count % 1000000 == 0:
-                        logger.info(f"Files prepared: {file_count}")
-    
-    del files_tsv
-    del files_data
-    del pkg_id_map
-    
-    logger.info(f"Importing {file_count} files via COPY...")
-    with open(files_tmp_path, 'r') as f:
-        cursor.copy_from(
-            f,
-            'files',
-            columns=('package_id', 'scan_id', 'product_id', 'system_id', 'path', 'digest', 'digest_algorithm'),
-            null='\\N'
-        )
-    raw_conn.commit()
-    os.unlink(files_tmp_path)
-    
-    job.processed_files = file_count
-    db.commit()
-    
-    logger.info(f"Import complete: {pkg_count} packages, {file_count} files")
+        pkg_id_map = {(row[1], row[2], row[3]): row[0] for row in cursor.fetchall()}
+        
+        # Check if files TSV exists
+        if not storage.exists(job.files_tsv_key):
+            logger.info("No files TSV found, skipping file import")
+            return
+        
+        # Download and decompress files TSV
+        logger.info("Downloading files TSV...")
+        files_data = storage.get(job.files_tsv_key)
+        files_tsv = _safe_gzip_decompress(files_data).decode('utf-8')
+        
+        # Write to temp file with IDs resolved
+        logger.info("Preparing files for COPY...")
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as f:
+            files_tmp_path = f.name
+            file_count = 0
+            for line in files_tsv.strip().split('\n'):
+                if line:
+                    parts = line.split('\t')
+                    # TSV format: pkg_name, pkg_version, pkg_arch, path, digest, digest_algo
+                    pkg_key = (parts[0], parts[1] if parts[1] != '\\N' else None, 
+                              parts[2] if parts[2] != '\\N' else None)
+                    pkg_id = pkg_id_map.get(pkg_key)
+                    if pkg_id:
+                        # Write: package_id, scan_id, product_id, system_id, path, digest, digest_algo
+                        f.write(f"{pkg_id}\t{scan.id}\t{product_id}\t{system_id}\t{parts[3]}\t{parts[4]}\t{parts[5]}\n")
+                        file_count += 1
+                        
+                        if file_count % 1000000 == 0:
+                            logger.info(f"Files prepared: {file_count}")
+        
+        del files_tsv
+        del files_data
+        del pkg_id_map
+        
+        logger.info(f"Importing {file_count} files via COPY...")
+        with open(files_tmp_path, 'r') as f:
+            cursor.copy_from(
+                f,
+                'files',
+                columns=('package_id', 'scan_id', 'product_id', 'system_id', 'path', 'digest', 'digest_algorithm'),
+                null='\\N'
+            )
+        raw_conn.commit()
+        
+        # Clean up files temp file immediately after use
+        os.unlink(files_tmp_path)
+        files_tmp_path = None
+        
+        job.processed_files = file_count
+        db.commit()
+        
+        logger.info(f"Import complete: {pkg_count} packages, {file_count} files")
+        
+    finally:
+        # Ensure temp files are cleaned up even on error
+        if pkg_tmp_path and os.path.exists(pkg_tmp_path):
+            try:
+                os.unlink(pkg_tmp_path)
+            except OSError:
+                pass
+        if files_tmp_path and os.path.exists(files_tmp_path):
+            try:
+                os.unlink(files_tmp_path)
+            except OSError:
+                pass
 
 
 def _import_tsv_sqlite(db, raw_conn, storage, job, scan, product, system):
     """Import TSV files into SQLite."""
-    import gzip
-    
     cursor = raw_conn.cursor()
     
     # Determine if this is a product or system import
     product_id = product.id if product else None
     system_id = system.id if system else None
     
-    # Download and decompress packages TSV
+    # Download and decompress packages TSV (with size limit)
     logger.info("Downloading packages TSV...")
     packages_data = storage.get(job.packages_tsv_key)
-    packages_tsv = gzip.decompress(packages_data).decode('utf-8')
+    packages_tsv = _safe_gzip_decompress(packages_data).decode('utf-8')
     
     logger.info("Importing packages...")
     pkg_count = 0
@@ -738,10 +799,10 @@ def _import_tsv_sqlite(db, raw_conn, storage, job, scan, product, system):
         logger.info("No files TSV found, skipping file import")
         return
     
-    # Download and decompress files TSV
+    # Download and decompress files TSV (with size limit)
     logger.info("Downloading files TSV...")
     files_data = storage.get(job.files_tsv_key)
-    files_tsv = gzip.decompress(files_data).decode('utf-8')
+    files_tsv = _safe_gzip_decompress(files_data).decode('utf-8')
     
     logger.info("Importing files...")
     file_count = 0

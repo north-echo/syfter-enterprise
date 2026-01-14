@@ -3,14 +3,54 @@ Scanner module - runs Syft to generate SBOMs.
 """
 
 import json
+import os
 import subprocess
 import shutil
+import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
 
 console = Console()
+
+# Maximum age for temp directories (1 hour)
+_TEMP_DIR_MAX_AGE_SECONDS = 3600
+
+
+def cleanup_stale_temp_dirs():
+    """
+    Clean up stale rh-syfter temp directories.
+    
+    This removes any rh-syfter-* directories in the system temp directory
+    that are older than _TEMP_DIR_MAX_AGE_SECONDS. This handles cases where
+    the process crashed before cleanup could occur.
+    """
+    temp_dir = Path(tempfile.gettempdir())
+    current_time = time.time()
+    cleaned = 0
+    
+    try:
+        for item in temp_dir.iterdir():
+            if item.is_dir() and item.name.startswith("rh-syfter-"):
+                try:
+                    # Check directory age
+                    mtime = item.stat().st_mtime
+                    age = current_time - mtime
+                    
+                    if age > _TEMP_DIR_MAX_AGE_SECONDS:
+                        shutil.rmtree(item, ignore_errors=True)
+                        cleaned += 1
+                except (OSError, PermissionError):
+                    # Skip directories we can't access
+                    pass
+    except (OSError, PermissionError):
+        # Can't list temp directory, skip cleanup
+        pass
+    
+    if cleaned > 0:
+        console.print(f"[dim]Cleaned up {cleaned} stale temp directories[/dim]")
 
 
 class SyftNotFoundError(Exception):
@@ -950,7 +990,10 @@ def scan_remote_host(
     
     # First, check if syft is available on remote host
     check_cmd = ["ssh"] + ssh_opts + [ssh_target, "which syft"]
-    result = subprocess.run(check_cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(check_cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise ScanError(f"Timeout connecting to {host}")
     if result.returncode != 0:
         raise ScanError(
             f"syft is not installed on {host}. "
@@ -959,12 +1002,16 @@ def scan_remote_host(
     
     # Get syft version on remote host
     version_cmd = ["ssh"] + ssh_opts + [ssh_target, "syft version -o json 2>/dev/null || syft version"]
-    result = subprocess.run(version_cmd, capture_output=True, text=True)
     try:
-        version_info = json.loads(result.stdout)
-        syft_version = version_info.get("version", "unknown")
-    except json.JSONDecodeError:
-        syft_version = result.stdout.strip().split()[-1] if result.stdout else "unknown"
+        result = subprocess.run(version_cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        syft_version = "unknown"
+    else:
+        try:
+            version_info = json.loads(result.stdout)
+            syft_version = version_info.get("version", "unknown")
+        except json.JSONDecodeError:
+            syft_version = result.stdout.strip().split()[-1] if result.stdout else "unknown"
     
     console.print(f"[dim]Remote syft version: {syft_version}[/dim]")
     
@@ -976,15 +1023,13 @@ def scan_remote_host(
     
     console.print(f"[dim]Running remote scan on {host}...[/dim]")
     
-    # Run syft on remote host and capture output
+    # Run syft on remote host and capture output (allow up to 30 minutes for large systems)
     scan_cmd = ["ssh"] + ssh_opts + [ssh_target, remote_cmd]
     
-    if show_progress:
-        # For remote scans, we can't easily separate stderr/stdout in real-time
-        # Just capture everything
-        result = subprocess.run(scan_cmd, capture_output=True, text=True)
-    else:
-        result = subprocess.run(scan_cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(scan_cmd, capture_output=True, text=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        raise ScanError(f"Remote scan on {host} timed out after 30 minutes")
     
     if result.returncode != 0:
         raise ScanError(f"Remote scan failed on {host}: {result.stderr}")

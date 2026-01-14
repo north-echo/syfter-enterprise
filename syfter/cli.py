@@ -33,6 +33,7 @@ from .scanner import (
     get_container_layer_info,
     get_package_source_images,
     check_syft_installed,
+    cleanup_stale_temp_dirs,
     SyftNotFoundError,
     ScanError,
 )
@@ -54,6 +55,30 @@ from .exporter import (
 )
 
 console = Console()
+
+# Maximum decompressed size to prevent zip bombs (500MB)
+_MAX_DECOMPRESSED_SIZE = 500 * 1024 * 1024
+
+
+def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -> bytes:
+    """
+    Safely decompress gzip data with size limit to prevent decompression bombs.
+    """
+    import io
+    decompressor = gzip.GzipFile(fileobj=io.BytesIO(data))
+    chunks = []
+    total_size = 0
+    
+    while True:
+        chunk = decompressor.read(1024 * 1024)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_size:
+            raise ValueError(f"Decompressed data exceeds {max_size // (1024*1024)}MB limit")
+        chunks.append(chunk)
+    
+    return b''.join(chunks)
 
 
 def get_server_url() -> Optional[str]:
@@ -95,6 +120,9 @@ def main(ctx, server_url: Optional[str], force_local: bool):
     ctx.ensure_object(dict)
     ctx.obj["server_url"] = None if force_local else server_url
     ctx.obj["local_mode"] = force_local or server_url is None
+    
+    # Clean up any stale temp directories from previous runs
+    cleanup_stale_temp_dirs()
 
 
 @main.command()
@@ -590,7 +618,7 @@ def _export_server(ctx, product, product_version, output_format, output):
     try:
         with SyfterClient(server_url) as client:
             data = client.get_sbom(product, product_version)
-            sbom = json.loads(gzip.decompress(data).decode("utf-8"))
+            sbom = json.loads(_safe_gzip_decompress(data).decode("utf-8"))
             _do_export(sbom, product, product_version, output_format, output)
     except httpx.ConnectError:
         console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")

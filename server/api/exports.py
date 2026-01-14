@@ -2,6 +2,8 @@
 Export API endpoints for retrieving SBOMs.
 """
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -11,6 +13,23 @@ from ..storage import get_storage
 from .schemas import ExportResponse
 
 router = APIRouter()
+
+
+def _sanitize_filename(name: str) -> str:
+    """
+    Sanitize a string for use in Content-Disposition filename.
+    
+    Removes or replaces characters that could break HTTP headers or cause
+    path traversal issues.
+    """
+    # Replace any non-alphanumeric chars (except dash, underscore, dot) with underscore
+    sanitized = re.sub(r'[^\w\-.]', '_', name)
+    # Remove any leading/trailing dots or dashes
+    sanitized = sanitized.strip('.-')
+    # Collapse multiple underscores
+    sanitized = re.sub(r'_+', '_', sanitized)
+    # Ensure it's not empty
+    return sanitized or "export"
 
 
 @router.get("/{product_name}/{product_version}")
@@ -41,6 +60,10 @@ def get_sbom(
     scan = result
     storage = get_storage()
 
+    # Sanitize product name/version for use in filename
+    safe_name = _sanitize_filename(product_name)
+    safe_version = _sanitize_filename(product_version)
+    
     if format == "syft-json":
         # Return the modified SBOM directly
         try:
@@ -49,7 +72,7 @@ def get_sbom(
                 content=data,
                 media_type="application/gzip",
                 headers={
-                    "Content-Disposition": f'attachment; filename="{product_name}-{product_version}.syft.json.gz"'
+                    "Content-Disposition": f'attachment; filename="{safe_name}-{safe_version}.syft.json.gz"'
                 },
             )
         except FileNotFoundError:
@@ -63,7 +86,7 @@ def get_sbom(
                 content=data,
                 media_type="application/gzip",
                 headers={
-                    "Content-Disposition": f'attachment; filename="{product_name}-{product_version}.original.json.gz"'
+                    "Content-Disposition": f'attachment; filename="{safe_name}-{safe_version}.original.json.gz"'
                 },
             )
         except FileNotFoundError:

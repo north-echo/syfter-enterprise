@@ -67,11 +67,15 @@ def export_sbom(
 
         console.print(f"[dim]Converting to {output_format}...[/dim]")
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout for conversion
+            )
+        except subprocess.TimeoutExpired:
+            raise ExportError(f"SBOM conversion to {output_format} timed out after 5 minutes")
 
         if result.returncode != 0:
             raise ExportError(f"Syft convert failed: {result.stderr}")
