@@ -180,9 +180,13 @@ def list_all_packages(
     List all packages for a product version.
     
     Returns a simple list suitable for piping to grep, etc.
+    Includes source_image and layer_id for container scans.
     """
     query = (
-        db.query(Package.name, Package.version, Package.release, Package.arch)
+        db.query(
+            Package.name, Package.version, Package.release, Package.arch,
+            Package.source_image, Package.layer_id
+        )
         .join(Product, Package.product_id == Product.id)
         .filter(Product.name == product_name, Product.version == product_version)
         .order_by(Package.name)
@@ -194,8 +198,10 @@ def list_all_packages(
             "version": version,
             "release": release,
             "arch": arch,
+            "source_image": source_image,
+            "layer_id": layer_id,
         }
-        for name, version, release, arch in query.all()
+        for name, version, release, arch, source_image, layer_id in query.all()
     ]
 
 

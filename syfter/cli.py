@@ -824,8 +824,9 @@ def list_jobs(ctx, status, product, limit):
               type=click.Choice(["files", "packages"]), 
               default="files", help="What to list (files or packages)")
 @click.option("--full", is_flag=True, help="Include architecture in package output (name-version.arch)")
+@click.option("--layers", is_flag=True, help="Include source layer info (for container scans, packages only)")
 @click.pass_context
-def list_contents(ctx, product, product_version, list_type, full):
+def list_contents(ctx, product, product_version, list_type, full, layers):
     """
     List files or packages for a product version.
     
@@ -841,14 +842,27 @@ def list_contents(ctx, product, product_version, list_type, full):
         rh-syfter list -p rhel -v 10.0 -t packages | wc -l
         
         rh-syfter list -p rhel -v 10.0 -t packages --full
+        
+        # List packages with source layer (format: layer::package)
+        rh-syfter list -p go-toolset -v 1.25 -t packages --layers
+        
+        # Find packages from a specific base image
+        rh-syfter list -p go-toolset -v 1.25 -t packages --layers | grep "^ubi9/ubi::"
+        
+        # Count packages per layer
+        rh-syfter list -p go-toolset -v 1.25 -t packages --layers | cut -d: -f1 | sort | uniq -c
     """
+    if layers and list_type == "files":
+        console.print("[yellow]Warning: --layers only applies to packages, ignoring[/yellow]")
+        layers = False
+    
     if ctx.obj["local_mode"]:
-        _list_local(product, product_version, list_type, full)
+        _list_local(product, product_version, list_type, full, layers)
     else:
-        _list_server(ctx, product, product_version, list_type, full)
+        _list_server(ctx, product, product_version, list_type, full, layers)
 
 
-def _list_local(product, product_version, list_type, full):
+def _list_local(product, product_version, list_type, full, layers=False):
     """List using local storage."""
     from .storage import Storage
     
@@ -860,15 +874,23 @@ def _list_local(product, product_version, list_type, full):
     else:
         for pkg in storage.list_all_packages(product, product_version):
             # Default: name-version, --full adds .arch
-            out = pkg["name"]
+            pkg_str = pkg["name"]
             if pkg.get("version"):
-                out += f"-{pkg['version']}"
+                pkg_str += f"-{pkg['version']}"
             if full and pkg.get("arch"):
-                out += f".{pkg['arch']}"
+                pkg_str += f".{pkg['arch']}"
+            
+            # With --layers, prepend source image with :: separator
+            if layers:
+                source_image = pkg.get("source_image") or "(unknown)"
+                out = f"{source_image}::{pkg_str}"
+            else:
+                out = pkg_str
+            
             click.echo(out)
 
 
-def _list_server(ctx, product, product_version, list_type, full):
+def _list_server(ctx, product, product_version, list_type, full, layers=False):
     """List using server."""
     from .client import SyfterClient, APIError
     import httpx
@@ -884,11 +906,19 @@ def _list_server(ctx, product, product_version, list_type, full):
                 packages = client.list_all_packages(product, product_version)
                 for pkg in packages:
                     # Default: name-version, --full adds .arch
-                    out = pkg["name"]
+                    pkg_str = pkg["name"]
                     if pkg.get("version"):
-                        out += f"-{pkg['version']}"
+                        pkg_str += f"-{pkg['version']}"
                     if full and pkg.get("arch"):
-                        out += f".{pkg['arch']}"
+                        pkg_str += f".{pkg['arch']}"
+                    
+                    # With --layers, prepend source image with :: separator
+                    if layers:
+                        source_image = pkg.get("source_image") or "(unknown)"
+                        out = f"{source_image}::{pkg_str}"
+                    else:
+                        out = pkg_str
+                    
                     click.echo(out)
     except httpx.ConnectError:
         console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")

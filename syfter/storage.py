@@ -681,20 +681,40 @@ class Storage:
             product_version: Product version
 
         Yields:
-            dict: Package info (name, version, arch, purl)
+            dict: Package info (name, version, arch, purl, source_image, layer_id)
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT pkg.name, pkg.version, pkg.release, pkg.arch, pkg.purl
-                FROM packages pkg
-                JOIN products p ON pkg.product_id = p.id
-                WHERE p.name = ? AND p.version = ?
-                ORDER BY pkg.name
-                """,
-                (product_name, product_version),
-            )
+            
+            # Check if layer columns exist (for backward compatibility)
+            cursor.execute("PRAGMA table_info(packages)")
+            columns = {row[1] for row in cursor.fetchall()}
+            has_layer_cols = "source_image" in columns and "layer_id" in columns
+            
+            if has_layer_cols:
+                cursor.execute(
+                    """
+                    SELECT pkg.name, pkg.version, pkg.release, pkg.arch, pkg.purl,
+                           pkg.source_image, pkg.layer_id
+                    FROM packages pkg
+                    JOIN products p ON pkg.product_id = p.id
+                    WHERE p.name = ? AND p.version = ?
+                    ORDER BY pkg.name
+                    """,
+                    (product_name, product_version),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT pkg.name, pkg.version, pkg.release, pkg.arch, pkg.purl,
+                           NULL as source_image, NULL as layer_id
+                    FROM packages pkg
+                    JOIN products p ON pkg.product_id = p.id
+                    WHERE p.name = ? AND p.version = ?
+                    ORDER BY pkg.name
+                    """,
+                    (product_name, product_version),
+                )
             for row in cursor:
                 yield dict(row)
 
