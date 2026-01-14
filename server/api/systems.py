@@ -21,18 +21,18 @@ def list_systems(
 ):
     """List all systems with scan, package, and file counts."""
     query = db.query(System).order_by(System.hostname)
-    
+
     if tag:
         query = query.filter(System.tag == tag)
-    
+
     systems_list = query.all()
-    
+
     systems = []
     for system in systems_list:
         scan_count = db.query(func.count(Scan.id)).filter(Scan.system_id == system.id).scalar() or 0
         total_packages = db.query(func.count(Package.id)).filter(Package.system_id == system.id).scalar() or 0
         total_files = db.query(func.count(File.id)).filter(File.system_id == system.id).scalar() or 0
-        
+
         systems.append(SystemResponse(
             id=system.id,
             hostname=system.hostname,
@@ -128,7 +128,7 @@ def update_system(hostname: str, system: SystemCreate, db: Session = Depends(get
     db_system.os_name = system.os_name
     db_system.os_version = system.os_version
     db_system.arch = system.arch
-    
+
     db.commit()
     db.refresh(db_system)
 

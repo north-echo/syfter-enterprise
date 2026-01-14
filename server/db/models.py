@@ -85,15 +85,15 @@ class Scan(Base):
     # Either product_id OR system_id should be set, not both
     product_id: Mapped[Optional[int]] = mapped_column(ForeignKey("products.id"), nullable=True)
     system_id: Mapped[Optional[int]] = mapped_column(ForeignKey("systems.id"), nullable=True)
-    
+
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(String(50), default="directory")
     scan_timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     syft_version: Mapped[Optional[str]] = mapped_column(String(50))
-    
+
     # User-provided scan label/version (for systems, defaults to scan date)
     scan_label: Mapped[Optional[str]] = mapped_column(String(100))
-    
+
     # Container image metadata (for container scans)
     image_id: Mapped[Optional[str]] = mapped_column(String(100))  # sha256 of image
     image_layers_json: Mapped[Optional[str]] = mapped_column(Text)  # JSON: [{layer_id, index, source_image}]
@@ -128,11 +128,11 @@ class ImageLayer(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
-    
+
     layer_id: Mapped[str] = mapped_column(String(100), nullable=False)  # sha256 digest
     layer_index: Mapped[int] = mapped_column(Integer, nullable=False)  # position (0=bottom)
     source_image: Mapped[Optional[str]] = mapped_column(String(500))  # image reference
-    
+
     # Relationships
     scan: Mapped["Scan"] = relationship(back_populates="image_layers")
 
@@ -163,7 +163,7 @@ class Package(Base):
     license: Mapped[Optional[str]] = mapped_column(Text)
     purl: Mapped[Optional[str]] = mapped_column(String(1000))
     cpes: Mapped[Optional[str]] = mapped_column(Text)  # JSON array
-    
+
     # Container layer tracking (for container scans)
     layer_id: Mapped[Optional[str]] = mapped_column(String(100))  # sha256 digest of layer
     layer_index: Mapped[Optional[int]] = mapped_column(Integer)  # position in layer stack (0=bottom)
@@ -221,42 +221,42 @@ class Job(Base):
     product_id: Mapped[Optional[int]] = mapped_column(ForeignKey("products.id"), nullable=True)
     system_id: Mapped[Optional[int]] = mapped_column(ForeignKey("systems.id"), nullable=True)
     scan_id: Mapped[Optional[int]] = mapped_column(ForeignKey("scans.id"), nullable=True)
-    
+
     # Job type: "product_import" or "system_import"
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, processing, complete, failed
     job_type: Mapped[str] = mapped_column(String(50), default="product_import")
-    
+
     # S3 keys for uploaded files
     original_sbom_key: Mapped[Optional[str]] = mapped_column(String(500))
     modified_sbom_key: Mapped[Optional[str]] = mapped_column(String(500))
     packages_tsv_key: Mapped[Optional[str]] = mapped_column(String(500))
     files_tsv_key: Mapped[Optional[str]] = mapped_column(String(500))
-    
+
     # Metadata - for products
     product_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     product_version: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    
+
     # Metadata - for systems
     system_hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     system_ip: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
     system_tag: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     scan_label: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    
+
     # Common metadata
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(String(50), default="directory")
     syft_version: Mapped[Optional[str]] = mapped_column(String(50))
     image_layers_json: Mapped[Optional[str]] = mapped_column(Text)  # Container layer chain
-    
+
     # Progress tracking
     total_packages: Mapped[int] = mapped_column(Integer, default=0)
     total_files: Mapped[int] = mapped_column(Integer, default=0)
     processed_packages: Mapped[int] = mapped_column(Integer, default=0)
     processed_files: Mapped[int] = mapped_column(Integer, default=0)
-    
+
     # Error tracking
     error_message: Mapped[Optional[str]] = mapped_column(Text)
-    
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime)

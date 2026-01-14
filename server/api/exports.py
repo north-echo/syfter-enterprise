@@ -18,7 +18,7 @@ router = APIRouter()
 def _sanitize_filename(name: str) -> str:
     """
     Sanitize a string for use in Content-Disposition filename.
-    
+
     Removes or replaces characters that could break HTTP headers or cause
     path traversal issues.
     """
@@ -63,7 +63,7 @@ def get_sbom(
     # Sanitize product name/version for use in filename
     safe_name = _sanitize_filename(product_name)
     safe_version = _sanitize_filename(product_version)
-    
+
     if format == "syft-json":
         # Return the modified SBOM directly
         try:

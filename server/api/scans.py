@@ -35,7 +35,7 @@ def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -
     decompressor = gzip.GzipFile(fileobj=io.BytesIO(data))
     chunks = []
     total_size = 0
-    
+
     while True:
         chunk = decompressor.read(1024 * 1024)
         if not chunk:
@@ -46,21 +46,21 @@ def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -
                 f"Decompressed data exceeds maximum size limit of {max_size // (1024*1024)}MB"
             )
         chunks.append(chunk)
-    
+
     return b''.join(chunks)
 
 
 def _validate_sbom_json(data: bytes, name: str = "SBOM") -> dict:
     """
     Validate that compressed data is valid gzip JSON.
-    
+
     Args:
         data: Compressed gzip data
         name: Name for error messages
-        
+
     Returns:
         Parsed JSON dict
-        
+
     Raises:
         HTTPException: If data is invalid
     """
@@ -70,7 +70,7 @@ def _validate_sbom_json(data: bytes, name: str = "SBOM") -> dict:
         raise HTTPException(status_code=400, detail=f"Invalid {name}: not valid gzip data")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid {name}: {e}")
-    
+
     try:
         return json.loads(decompressed.decode("utf-8"))
     except json.JSONDecodeError as e:
@@ -172,7 +172,7 @@ async def upload_scan(
     """
     start_time = time.time()
     logger.info(f"Starting upload for {product_name}-{product_version}")
-    
+
     storage = get_storage()
 
     # Get or create product
@@ -201,23 +201,23 @@ async def upload_scan(
     if existing_scan:
         logger.info(f"Deleting existing scan {existing_scan.id}")
         delete_start = time.time()
-        
+
         # Delete old SBOM files from storage
         try:
             storage.delete(existing_scan.original_sbom_key)
             storage.delete(existing_scan.modified_sbom_key)
         except Exception:
             pass  # Ignore storage errors
-        
+
         # Use raw SQL for fast deletion (ORM is extremely slow for millions of rows)
         connection = db.connection()
         raw_conn = connection.connection.dbapi_connection
         cursor = raw_conn.cursor()
-        
+
         # Check if PostgreSQL or SQLite
         is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
         param = '%s' if is_postgres else '?'
-        
+
         # Delete files first (foreign key), then packages, then scan
         # Commit after each to release locks and let PostgreSQL reclaim space
         logger.info("Deleting files...")
@@ -225,20 +225,20 @@ async def upload_scan(
         raw_conn.commit()
         files_time = time.time() - delete_start
         logger.info(f"Files deleted in {files_time:.1f}s")
-        
+
         logger.info("Deleting packages...")
         pkg_start = time.time()
         cursor.execute(f"DELETE FROM packages WHERE scan_id = {param}", (existing_scan.id,))
         raw_conn.commit()
         logger.info(f"Packages deleted in {time.time() - pkg_start:.1f}s")
-        
+
         logger.info("Deleting scan record...")
         cursor.execute(f"DELETE FROM scans WHERE id = {param}", (existing_scan.id,))
         raw_conn.commit()
-        
+
         # Refresh ORM session
         db.expire_all()
-        
+
         logger.info(f"Existing scan deleted in {time.time() - delete_start:.1f}s")
 
     # Read uploaded files
@@ -266,12 +266,12 @@ async def upload_scan(
         packages_json_bytes = _safe_gzip_decompress(packages_data)
         # Free the compressed data immediately
         del packages_data
-        
+
         # Parse JSON
         packages_list = json.loads(packages_json_bytes.decode("utf-8"))
         # Free the JSON bytes immediately
         del packages_json_bytes
-        
+
         import gc
         gc.collect()
         logger.info(f"JSON parsed, memory cleaned up")
@@ -284,7 +284,7 @@ async def upload_scan(
         raise HTTPException(status_code=400, detail=f"Invalid packages JSON format: {e}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid packages JSON: {e}")
-    
+
     total_files = sum(len(p.get("files", [])) for p in packages_list)
     logger.info(f"Parsed {len(packages_list)} packages with {total_files} files")
 
@@ -321,19 +321,19 @@ async def upload_scan(
 
     # Index packages and files using raw SQL for maximum performance
     logger.info("Indexing packages and files...")
-    
+
     # Use raw connection for fast bulk inserts
     connection = db.connection()
     raw_conn = connection.connection.dbapi_connection
-    
+
     # Check if PostgreSQL or SQLite by looking at the connection type
     is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
-    
+
     # Insert packages and get their IDs
     packages_count = len(packages_list)
     logger.info(f"Inserting {packages_count} packages...")
     bulk_start = time.time()
-    
+
     # Build package tuples
     package_tuples = [
         (
@@ -351,7 +351,7 @@ async def upload_scan(
         )
         for pkg in packages_list
     ]
-    
+
     if is_postgres:
         # Use PostgreSQL's execute_values for fast bulk insert
         from psycopg2.extras import execute_values
@@ -373,13 +373,13 @@ async def upload_scan(
             package_tuples
         )
         raw_conn.commit()
-    
+
     logger.info(f"Packages inserted in {time.time() - bulk_start:.1f}s")
-    
+
     # Check if we should skip file indexing for large scans
     config = get_config()
     skip_threshold = config.skip_file_index_threshold
-    
+
     if skip_threshold > 0 and total_files > skip_threshold:
         logger.info(f"Skipping file indexing: {total_files} files exceeds threshold of {skip_threshold}")
         logger.info("File search will not be available for this scan, but packages are indexed")
@@ -388,19 +388,19 @@ async def upload_scan(
         # Get package IDs
         logger.info("Retrieving package IDs...")
         cursor = raw_conn.cursor()
-        cursor.execute("SELECT id, name, version, arch FROM packages WHERE scan_id = %s" if is_postgres else 
+        cursor.execute("SELECT id, name, version, arch FROM packages WHERE scan_id = %s" if is_postgres else
                        "SELECT id, name, version, arch FROM packages WHERE scan_id = ?", (scan.id,))
         packages_by_key = {(row[1], row[2], row[3]): row[0] for row in cursor.fetchall()}
-        
+
         logger.info(f"Inserting {total_files} files...")
         bulk_start = time.time()
         file_count_actual = 0
-        
+
         if is_postgres:
             # Stream files directly to a temp file, then COPY - avoids holding all in memory
             import tempfile
             import os
-            
+
             logger.info("Writing files to temp file for COPY...")
             with tempfile.NamedTemporaryFile(mode='w', suffix='.tsv', delete=False) as tmp:
                 tmp_path = tmp.name
@@ -413,27 +413,27 @@ async def upload_scan(
                             path = f.get("path", "")
                             digest = f.get("digest")
                             algo = f.get("digest_algorithm", "sha256")
-                            
+
                             # Escape special chars
                             path = path.replace('\\', '\\\\').replace('\t', '\\t').replace('\n', '\\n') if path else ''
                             digest_str = digest.replace('\\', '\\\\') if digest else '\\N'
                             algo_str = algo.replace('\\', '\\\\') if algo else '\\N'
-                            
+
                             tmp.write(f"{package_id}\t{scan.id}\t{product.id}\t{path}\t{digest_str}\t{algo_str}\n")
                             file_count_actual += 1
-                            
+
                             # Log progress periodically
                             if file_count_actual % 1000000 == 0:
                                 logger.info(f"Files written to temp: {file_count_actual}/{total_files}")
-            
+
             logger.info(f"Temp file written: {file_count_actual} files, {os.path.getsize(tmp_path)/1024/1024:.1f}MB")
-            
+
             # Free packages_list memory before COPY
             del packages_list
             import gc
             gc.collect()
             logger.info("Memory freed, starting COPY...")
-            
+
             # COPY from file
             cursor = raw_conn.cursor()
             with open(tmp_path, 'r') as f:
@@ -444,7 +444,7 @@ async def upload_scan(
                     null='\\N'
                 )
             raw_conn.commit()
-            
+
             # Clean up temp file
             os.unlink(tmp_path)
             logger.info(f"COPY complete")
@@ -453,7 +453,7 @@ async def upload_scan(
             cursor = raw_conn.cursor()
             batch = []
             batch_size = 50000
-            
+
             for pkg in packages_list:
                 key = (pkg.get("name", ""), pkg.get("version"), pkg.get("arch"))
                 package_id = packages_by_key.get(key)
@@ -468,7 +468,7 @@ async def upload_scan(
                             f.get("digest_algorithm", "sha256"),
                         ))
                         file_count_actual += 1
-                        
+
                         if len(batch) >= batch_size:
                             cursor.executemany(
                                 """INSERT INTO files (package_id, scan_id, product_id, path, digest, digest_algorithm)
@@ -479,7 +479,7 @@ async def upload_scan(
                             if file_count_actual % 500000 == 0:
                                 raw_conn.commit()
                                 logger.info(f"Files progress: {file_count_actual}/{total_files}")
-            
+
             # Insert remaining
             if batch:
                 cursor.executemany(
@@ -488,12 +488,12 @@ async def upload_scan(
                     batch
                 )
             raw_conn.commit()
-        
+
         logger.info(f"Files inserted in {time.time() - bulk_start:.1f}s")
-    
+
     # Refresh session to pick up raw SQL changes
     db.expire_all()
-    
+
     elapsed = time.time() - start_time
     logger.info(f"Upload complete: {packages_count} packages, {file_count_actual} files indexed in {elapsed:.1f}s")
 
@@ -532,10 +532,10 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db)):
     connection = db.connection()
     raw_conn = connection.connection.dbapi_connection
     cursor = raw_conn.cursor()
-    
+
     is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
     param = '%s' if is_postgres else '?'
-    
+
     cursor.execute(f"DELETE FROM files WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM packages WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM scans WHERE id = {param}", (scan_id,))

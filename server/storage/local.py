@@ -59,7 +59,7 @@ class LocalStorage(StorageBackend):
     def get_presigned_upload_url(self, key: str, expires_in: int = 3600) -> str:
         """
         Get URL for uploading (for local storage, returns file:// path).
-        
+
         Note: Local storage doesn't support presigned URLs, so this returns
         a special URL that the client should interpret as a local path.
         """

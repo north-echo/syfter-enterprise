@@ -19,13 +19,13 @@ def list_products(db: Session = Depends(get_db)):
     """List all products with scan, package, and file counts."""
     # Get all products first
     products_list = db.query(Product).order_by(Product.name, Product.version).all()
-    
+
     products = []
     for product in products_list:
         scan_count = db.query(func.count(Scan.id)).filter(Scan.product_id == product.id).scalar() or 0
         total_packages = db.query(func.count(Package.id)).filter(Package.product_id == product.id).scalar() or 0
         total_files = db.query(func.count(File.id)).filter(File.product_id == product.id).scalar() or 0
-        
+
         products.append(ProductResponse(
             id=product.id,
             name=product.name,
@@ -121,7 +121,7 @@ def create_product(product: ProductCreate, db: Session = Depends(get_db)):
 def get_product_layers(product_name: str, product_version: str, db: Session = Depends(get_db)):
     """Get container layer chain for a product (for container scans only)."""
     import json
-    
+
     product = (
         db.query(Product)
         .filter(Product.name == product_name, Product.version == product_version)

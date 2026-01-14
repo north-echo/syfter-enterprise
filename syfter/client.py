@@ -29,19 +29,19 @@ class APIError(Exception):
 def build_tsv_files(packages: list) -> Tuple[bytes, bytes, int, int]:
     """
     Build gzip-compressed TSV files from package data.
-    
+
     Args:
         packages: List of package dicts with 'files' key
-        
+
     Returns:
         Tuple of (packages_tsv_gz, files_tsv_gz, package_count, file_count)
     """
     packages_buffer = io.StringIO()
     files_buffer = io.StringIO()
-    
+
     package_count = 0
     file_count = 0
-    
+
     for pkg in packages:
         # Package TSV: name, version, release, arch, epoch, source_rpm, license, purl, cpes, layer_id, layer_index, source_image
         layer_index = pkg.get("layer_index")
@@ -63,12 +63,12 @@ def build_tsv_files(packages: list) -> Tuple[bytes, bytes, int, int]:
         pkg_fields = [f.replace("\t", " ").replace("\n", " ").replace("\r", "") for f in pkg_fields]
         packages_buffer.write("\t".join(pkg_fields) + "\n")
         package_count += 1
-        
+
         # Files TSV: pkg_name, pkg_version, pkg_arch, path, digest, digest_algo
         pkg_name = pkg.get("name", "")
         pkg_version = pkg.get("version") or "\\N"
         pkg_arch = pkg.get("arch") or "\\N"
-        
+
         for f in pkg.get("files", []):
             file_fields = [
                 pkg_name,
@@ -81,11 +81,11 @@ def build_tsv_files(packages: list) -> Tuple[bytes, bytes, int, int]:
             file_fields = [fld.replace("\t", " ").replace("\n", " ").replace("\r", "") for fld in file_fields]
             files_buffer.write("\t".join(file_fields) + "\n")
             file_count += 1
-    
+
     # Compress
     packages_tsv_gz = gzip.compress(packages_buffer.getvalue().encode('utf-8'))
     files_tsv_gz = gzip.compress(files_buffer.getvalue().encode('utf-8')) if file_count > 0 else b""
-    
+
     return packages_tsv_gz, files_tsv_gz, package_count, file_count
 
 
@@ -217,15 +217,15 @@ class SyfterClient:
         import tempfile
         import subprocess
         import os
-        
+
         # Compress data to temp files for streaming upload
         console.print("[dim]Compressing data to temp files...[/dim]")
-        
+
         with tempfile.TemporaryDirectory() as tmpdir:
             original_path = Path(tmpdir) / "original.json.gz"
             modified_path = Path(tmpdir) / "modified.json.gz"
             packages_path = Path(tmpdir) / "packages.json.gz"
-            
+
             # Write compressed data to files
             with gzip.open(original_path, 'wt', encoding='utf-8') as f:
                 json.dump(original_sbom, f)
@@ -233,7 +233,7 @@ class SyfterClient:
                 json.dump(modified_sbom, f)
             with gzip.open(packages_path, 'wt', encoding='utf-8') as f:
                 json.dump(packages, f)
-            
+
             original_size = original_path.stat().st_size
             modified_size = modified_path.stat().st_size
             packages_size = packages_path.stat().st_size
@@ -247,7 +247,7 @@ class SyfterClient:
                 f"(total: {total_size/1024/1024:.1f}MB)[/dim]"
             )
             console.print("[dim]Sending to server via curl (this may take a while for large uploads)...[/dim]")
-            
+
             # Use curl for large uploads - more reliable for very large multipart uploads
             curl_cmd = [
                 "curl", "-s", "-S", "-X", "POST",
@@ -263,12 +263,12 @@ class SyfterClient:
                 "--connect-timeout", "30",
                 "--max-time", "10800",  # 3 hours max for very large uploads
             ]
-            
+
             result = subprocess.run(curl_cmd, capture_output=True, text=True)
-            
+
             if result.returncode != 0:
                 raise APIError(500, f"Upload failed: {result.stderr}")
-            
+
             try:
                 response_data = json.loads(result.stdout)
                 if "detail" in response_data:
@@ -299,17 +299,17 @@ class SyfterClient:
     ) -> dict:
         """
         Upload a scan using the async job-based flow.
-        
+
         This method:
         1. Creates a job and gets presigned upload URLs
         2. Builds TSV files from packages
         3. Uploads SBOMs and TSV files to S3
         4. Starts the job
         5. Polls for completion
-        
+
         This is memory-efficient for the server as it doesn't need to
         parse large JSON files.
-        
+
         Args:
             product_name: Product name
             product_version: Product version
@@ -321,19 +321,19 @@ class SyfterClient:
             packages: List of package dicts for indexing
             image_layers: Optional list of container layer info
             poll_interval: Seconds between status polls
-            
+
         Returns:
             dict: Job response with scan_id when complete
         """
         import tempfile
         import subprocess
-        
+
         # Count files
         total_files = sum(len(pkg.get("files", [])) for pkg in packages)
         total_packages = len(packages)
-        
+
         console.print(f"[dim]Preparing upload: {total_packages} packages, {total_files} files[/dim]")
-        
+
         # Step 1: Create job
         console.print("[dim]Creating import job...[/dim]")
         job_response = self.create_job(
@@ -348,7 +348,7 @@ class SyfterClient:
         )
         job_id = job_response["job_id"]
         console.print(f"[dim]Job created: {job_id}[/dim]")
-        
+
         # Step 2: Build TSV files
         console.print("[dim]Building TSV files...[/dim]")
         packages_tsv_gz, files_tsv_gz, pkg_count, file_count = build_tsv_files(packages)
@@ -356,29 +356,29 @@ class SyfterClient:
             f"[dim]TSV built: packages={len(packages_tsv_gz)/1024:.1f}KB, "
             f"files={len(files_tsv_gz)/1024:.1f}KB[/dim]"
         )
-        
+
         # Step 3: Upload files to presigned URLs
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
-            
+
             # Write compressed SBOMs
             original_path = tmpdir / "original.json.gz"
             modified_path = tmpdir / "modified.json.gz"
             packages_path = tmpdir / "packages.tsv.gz"
             files_path = tmpdir / "files.tsv.gz"
-            
+
             console.print("[dim]Compressing SBOMs...[/dim]")
             with gzip.open(original_path, 'wt', encoding='utf-8') as f:
                 json.dump(original_sbom, f)
             with gzip.open(modified_path, 'wt', encoding='utf-8') as f:
                 json.dump(modified_sbom, f)
-            
+
             packages_path.write_bytes(packages_tsv_gz)
             if files_tsv_gz:
                 files_path.write_bytes(files_tsv_gz)
-            
+
             console.print("[dim]Uploading files to storage...[/dim]")
-            
+
             # Upload each file to its presigned URL
             uploads = [
                 ("original_sbom", original_path, job_response["original_sbom_url"]),
@@ -387,24 +387,24 @@ class SyfterClient:
             ]
             if files_tsv_gz:
                 uploads.append(("files_tsv", files_path, job_response["files_tsv_url"]))
-            
+
             for name, path, url in uploads:
                 size_kb = path.stat().st_size / 1024
                 console.print(f"[dim]  Uploading {name} ({size_kb:.1f}KB)...[/dim]")
                 self._upload_to_presigned_url(url, path)
-        
+
         # Step 4: Start the job
         console.print("[dim]Starting import job...[/dim]")
         job_status = self.start_job(job_id)
-        
+
         # Step 5: Poll for completion
         console.print("[dim]Processing in background, polling for status...[/dim]")
         return self.wait_for_job(job_id, poll_interval=poll_interval)
-    
+
     def _upload_to_presigned_url(self, url: str, file_path: Path) -> None:
         """Upload a file to a presigned URL using curl."""
         import subprocess
-        
+
         result = subprocess.run(
             [
                 "curl", "-s", "-S", "-X", "PUT",
@@ -417,7 +417,7 @@ class SyfterClient:
         )
         if result.returncode != 0:
             raise APIError(500, f"Failed to upload to presigned URL: {result.stderr}")
-    
+
     def create_job(
         self,
         product_name: str,
@@ -441,23 +441,23 @@ class SyfterClient:
         }
         if image_layers:
             payload["image_layers_json"] = json.dumps(image_layers)
-        
+
         response = self.client.post(
             self._url("/jobs"),
             json=payload,
         )
         return self._handle_response(response)
-    
+
     def start_job(self, job_id: str) -> dict:
         """Start processing an uploaded job."""
         response = self.client.post(self._url(f"/jobs/{job_id}/start"))
         return self._handle_response(response)
-    
+
     def get_job(self, job_id: str) -> dict:
         """Get job status."""
         response = self.client.get(self._url(f"/jobs/{job_id}"))
         return self._handle_response(response)
-    
+
     def list_jobs(
         self,
         status: Optional[str] = None,
@@ -472,12 +472,12 @@ class SyfterClient:
             params["product_name"] = product_name
         response = self.client.get(self._url("/jobs"), params=params)
         return self._handle_response(response)
-    
+
     def cancel_job(self, job_id: str) -> dict:
         """Cancel a pending job."""
         response = self.client.delete(self._url(f"/jobs/{job_id}"))
         return self._handle_response(response)
-    
+
     def wait_for_job(
         self,
         job_id: str,
@@ -486,21 +486,21 @@ class SyfterClient:
     ) -> dict:
         """
         Wait for a job to complete.
-        
+
         Args:
             job_id: Job ID to wait for
             poll_interval: Seconds between status checks
             timeout: Maximum time to wait in seconds
-            
+
         Returns:
             dict: Final job status
-            
+
         Raises:
             APIError: If job fails or times out
         """
         start_time = time.time()
         last_progress = ""
-        
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -508,31 +508,31 @@ class SyfterClient:
             transient=True,
         ) as progress:
             task = progress.add_task("Processing...", total=None)
-            
+
             while True:
                 elapsed = time.time() - start_time
                 if elapsed > timeout:
                     raise APIError(408, f"Job timed out after {timeout}s")
-                
+
                 job = self.get_job(job_id)
                 status = job["status"]
-                
+
                 # Update progress display
                 if job["total_files"] > 0:
                     pct = (job["processed_files"] / job["total_files"]) * 100
                     desc = f"Processing: {job['processed_packages']}/{job['total_packages']} pkgs, {job['processed_files']}/{job['total_files']} files ({pct:.0f}%)"
                 else:
                     desc = f"Processing: {job['processed_packages']}/{job['total_packages']} packages"
-                
+
                 if desc != last_progress:
                     progress.update(task, description=desc)
                     last_progress = desc
-                
+
                 if status == "complete":
                     return job
                 elif status == "failed":
                     raise APIError(500, f"Job failed: {job.get('error_message', 'Unknown error')}")
-                
+
                 time.sleep(poll_interval)
 
     # Query operations
@@ -602,7 +602,7 @@ class SyfterClient:
     # ========================================================================
     # System operations (infrastructure mode)
     # ========================================================================
-    
+
     def list_systems(self, tag: Optional[str] = None) -> list:
         """List all systems."""
         params = {}
@@ -687,14 +687,14 @@ class SyfterClient:
     ) -> dict:
         """
         Upload a system scan using the async job-based flow.
-        
+
         This method:
         1. Creates a job and gets presigned upload URLs
         2. Builds TSV files from packages
         3. Uploads SBOMs and TSV files to S3
         4. Starts the job
         5. Polls for completion
-        
+
         Args:
             hostname: System hostname
             ip_address: System IP address
@@ -707,18 +707,18 @@ class SyfterClient:
             modified_sbom: Modified SBOM dict
             packages: List of package dicts for indexing
             poll_interval: Seconds between status polls
-            
+
         Returns:
             dict: Job response with scan_id when complete
         """
         import tempfile
-        
+
         # Count files
         total_files = sum(len(pkg.get("files", [])) for pkg in packages)
         total_packages = len(packages)
-        
+
         console.print(f"[dim]Preparing upload: {total_packages} packages, {total_files} files[/dim]")
-        
+
         # Step 1: Create job for system
         console.print("[dim]Creating system import job...[/dim]")
         job_response = self.create_system_job(
@@ -734,7 +734,7 @@ class SyfterClient:
         )
         job_id = job_response["job_id"]
         console.print(f"[dim]Job created: {job_id}[/dim]")
-        
+
         # Step 2: Build TSV files
         console.print("[dim]Building TSV files...[/dim]")
         packages_tsv_gz, files_tsv_gz, pkg_count, file_count = build_tsv_files(packages)
@@ -742,29 +742,29 @@ class SyfterClient:
             f"[dim]TSV built: packages={len(packages_tsv_gz)/1024:.1f}KB, "
             f"files={len(files_tsv_gz)/1024:.1f}KB[/dim]"
         )
-        
+
         # Step 3: Upload files to presigned URLs
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir)
-            
+
             # Write compressed SBOMs
             original_path = tmpdir / "original.json.gz"
             modified_path = tmpdir / "modified.json.gz"
             packages_path = tmpdir / "packages.tsv.gz"
             files_path = tmpdir / "files.tsv.gz"
-            
+
             console.print("[dim]Compressing SBOMs...[/dim]")
             with gzip.open(original_path, 'wt', encoding='utf-8') as f:
                 json.dump(original_sbom, f)
             with gzip.open(modified_path, 'wt', encoding='utf-8') as f:
                 json.dump(modified_sbom, f)
-            
+
             packages_path.write_bytes(packages_tsv_gz)
             if files_tsv_gz:
                 files_path.write_bytes(files_tsv_gz)
-            
+
             console.print("[dim]Uploading files to storage...[/dim]")
-            
+
             # Upload each file to its presigned URL
             uploads = [
                 ("original_sbom", original_path, job_response["original_sbom_url"]),
@@ -773,16 +773,16 @@ class SyfterClient:
             ]
             if files_tsv_gz:
                 uploads.append(("files_tsv", files_path, job_response["files_tsv_url"]))
-            
+
             for name, path, url in uploads:
                 size_kb = path.stat().st_size / 1024
                 console.print(f"[dim]  Uploading {name} ({size_kb:.1f}KB)...[/dim]")
                 self._upload_to_presigned_url(url, path)
-        
+
         # Step 4: Start the job
         console.print("[dim]Starting import job...[/dim]")
         job_status = self.start_job(job_id)
-        
+
         # Step 5: Poll for completion
         console.print("[dim]Processing in background, polling for status...[/dim]")
         return self.wait_for_job(job_id, poll_interval=poll_interval)

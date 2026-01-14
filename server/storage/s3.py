@@ -38,7 +38,7 @@ class S3Storage(StorageBackend):
             )
 
         self.client = boto3.client("s3", **client_kwargs)
-        
+
         # Create a separate client for external presigned URLs if configured
         self.external_client = None
         if config.s3_external_endpoint and config.s3_external_endpoint != config.s3_endpoint:

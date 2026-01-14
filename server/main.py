@@ -43,11 +43,11 @@ app.add_middleware(
 async def log_requests(request: Request, call_next):
     """Log all incoming requests with timing."""
     start_time = time.time()
-    
+
     # Log request start
     content_length = request.headers.get("content-length", "unknown")
     logger.info(f"Request started: {request.method} {request.url.path} (size: {content_length})")
-    
+
     try:
         response = await call_next(request)
         elapsed = time.time() - start_time

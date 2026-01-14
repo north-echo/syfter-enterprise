@@ -178,7 +178,7 @@ def list_all_packages(
 ):
     """
     List all packages for a product version.
-    
+
     Returns a simple list suitable for piping to grep, etc.
     Includes source_image and layer_id for container scans.
     """
@@ -191,7 +191,7 @@ def list_all_packages(
         .filter(Product.name == product_name, Product.version == product_version)
         .order_by(Package.name)
     )
-    
+
     return [
         {
             "name": name,
@@ -213,7 +213,7 @@ def list_all_files(
 ):
     """
     List all file paths for a product version.
-    
+
     Returns a simple list of file paths suitable for piping to grep, etc.
     """
     query = (
@@ -222,7 +222,7 @@ def list_all_files(
         .filter(Product.name == product_name, Product.version == product_version)
         .order_by(File.path)
     )
-    
+
     return [path for (path,) in query.all()]
 
 
@@ -325,7 +325,7 @@ def list_system_packages(
 ):
     """
     List all packages for a system.
-    
+
     Returns a simple list suitable for piping to grep, etc.
     """
     query = (
@@ -334,7 +334,7 @@ def list_system_packages(
         .filter(System.hostname == hostname)
         .order_by(Package.name)
     )
-    
+
     return [
         {
             "name": name,
@@ -353,7 +353,7 @@ def list_system_files(
 ):
     """
     List all file paths for a system.
-    
+
     Returns a simple list of file paths suitable for piping to grep, etc.
     """
     query = (
@@ -362,5 +362,5 @@ def list_system_files(
         .filter(System.hostname == hostname)
         .order_by(File.path)
     )
-    
+
     return [path for (path,) in query.all()]

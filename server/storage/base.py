@@ -20,21 +20,21 @@ _MAX_DECOMPRESSED_SIZE = 500 * 1024 * 1024
 def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -> bytes:
     """
     Safely decompress gzip data with size limit to prevent decompression bombs.
-    
+
     Args:
         data: Compressed gzip data
         max_size: Maximum allowed decompressed size in bytes
-        
+
     Returns:
         Decompressed bytes
-        
+
     Raises:
         ValueError: If decompressed size exceeds limit
     """
     decompressor = gzip.GzipFile(fileobj=io.BytesIO(data))
     chunks = []
     total_size = 0
-    
+
     while True:
         chunk = decompressor.read(1024 * 1024)  # Read 1MB at a time
         if not chunk:
@@ -45,7 +45,7 @@ def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -
                 f"Decompressed data exceeds maximum size limit of {max_size // (1024*1024)}MB"
             )
         chunks.append(chunk)
-    
+
     return b''.join(chunks)
 
 
