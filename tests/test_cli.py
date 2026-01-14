@@ -27,7 +27,7 @@ class TestCliBasics:
         """--help should work."""
         result = runner.invoke(main, ["--help"])
         assert result.exit_code == 0
-        assert "RH-Syfter" in result.output
+        assert "Syfter" in result.output
     
     def test_version(self, runner):
         """--version should work."""

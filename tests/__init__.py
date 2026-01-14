@@ -1,1 +1,1 @@
-# RH-Syfter Test Suite
+# Syfter Test Suite

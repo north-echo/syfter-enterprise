@@ -1,18 +1,18 @@
-# RH-Syfter Deployment Guide
+# Syfter Deployment Guide
 
-This guide covers deploying the RH-Syfter server and clients for production use.
+This guide covers deploying the Syfter server and clients for production use.
 
 ## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      RH-Syfter Clients                          │
+│                      Syfter Clients                             │
 │  (scan targets, upload SBOMs, query packages, export SBOMs)     │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                      RH-Syfter API Server                       │
+│                      Syfter API Server                          │
 │                    (FastAPI, 20-30 clients)                     │
 └─────────────────────────────────────────────────────────────────┘
            │                                    │
@@ -25,9 +25,9 @@ This guide covers deploying the RH-Syfter server and clients for production use.
 └─────────────────────┘              └─────────────────────┘
 ```
 
-## Quick Start with Docker Compose
+## Quick Start with Podman Compose
 
-The easiest way to deploy is using Docker Compose:
+The easiest way to deploy is using Podman Compose:
 
 ```bash
 cd docker
@@ -40,11 +40,11 @@ MINIO_ROOT_PASSWORD=your_minio_password
 EOF
 
 # Start all services
-docker-compose up -d
+podman-compose up -d
 
 # Check status
-docker-compose ps
-docker-compose logs -f api
+podman-compose ps
+podman-compose logs -f syfter-api
 ```
 
 The API will be available at http://localhost:8000
@@ -67,7 +67,7 @@ MINIO_ROOT_PASSWORD=your_minio_password
 DOCKER_DEFAULT_PLATFORM=linux/arm64
 EOF
 
-# Build and start with ARM images (for podman-compose)
+# Build and start with ARM images
 podman-compose build
 podman-compose up -d
 ```
@@ -176,20 +176,20 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now minio
 ```
 
-### 3. RH-Syfter API Server
+### 3. Syfter API Server
 
 #### Install
 
 ```bash
-# Clone repository
-git clone https://github.com/redhat/rh-syfter.git
-cd rh-syfter
+# Install from PyPI
+pip install "syfter[server]"
 
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
+# Or from wheel file (offline)
+pip install "syfter-0.9.0-py3-none-any.whl[server]"
 
-# Install with server dependencies
+# Or from source
+git clone https://github.com/redhat/syfter.git
+cd syfter
 pip install -e ".[server]"
 ```
 
@@ -227,6 +227,9 @@ python -m uvicorn server.main:app --reload
 
 # Production mode
 python -m uvicorn server.main:app --host 0.0.0.0 --port 8000 --workers 4
+
+# Or using the entry point
+syfter-server
 ```
 
 Or as a systemd service:
@@ -234,16 +237,16 @@ Or as a systemd service:
 ```bash
 sudo cat > /etc/systemd/system/syfter-api.service << EOF
 [Unit]
-Description=RH-Syfter API Server
+Description=Syfter API Server
 After=network.target postgresql.service minio.service
 
 [Service]
 User=syfter
 Group=syfter
-WorkingDirectory=/opt/rh-syfter
-Environment="PATH=/opt/rh-syfter/.venv/bin"
-EnvironmentFile=/opt/rh-syfter/.env
-ExecStart=/opt/rh-syfter/.venv/bin/python -m uvicorn server.main:app --host 0.0.0.0 --port 8000 --workers 4
+WorkingDirectory=/opt/syfter
+Environment="PATH=/opt/syfter/.venv/bin"
+EnvironmentFile=/opt/syfter/.env
+ExecStart=/opt/syfter/.venv/bin/syfter-server
 Restart=always
 
 [Install]
@@ -263,16 +266,16 @@ Configure clients to use the server:
 export SYFTER_SERVER=http://your-server:8000
 
 # Verify connection
-rh-syfter stats
+syfter stats
 
 # Run a scan
-rh-syfter scan /path/to/rpms -p rhel -v 10.0
+syfter scan /path/to/rpms -p rhel -v 10.0
 
 # Query packages
-rh-syfter query -n "kernel%"
+syfter query -n "kernel%"
 
 # Export SBOM
-rh-syfter export -p rhel -v 10.0 -f spdx-json -o rhel-10.spdx.json
+syfter export -p rhel -v 10.0 -f spdx-json -o rhel-10.spdx.json
 ```
 
 ## Production Considerations
@@ -346,7 +349,7 @@ psql -U syfter -d syfter -c "ANALYZE;"
 - Check PostgreSQL connection limits
 - For very large scans (e.g., RHEL with 8M+ files), use `--skip-files` to disable file indexing:
   ```bash
-  rh-syfter scan /path/to/rpms -p rhel -v 10.0 --skip-files
+  syfter scan /path/to/rpms -p rhel -v 10.0 --skip-files
   ```
 - Increase server memory or reduce worker count
 
@@ -356,7 +359,7 @@ Linux distribution scans (RHEL, Fedora) can have millions of files. To handle th
 
 1. **Skip file indexing on client** (recommended for distro scans):
    ```bash
-   rh-syfter scan /path/to/rpms -p rhel -v 10.0 --skip-files
+   syfter scan /path/to/rpms -p rhel -v 10.0 --skip-files
    ```
    This reduces the packages JSON from ~300MB to ~1MB.
 
@@ -369,4 +372,4 @@ Linux distribution scans (RHEL, Fedora) can have millions of files. To handle th
      SYFTER_SKIP_FILE_INDEX_THRESHOLD: 50000  # Skip file indexing above 50K files
    ```
 
-**Trade-off**: File search (`rh-syfter query -f /path/to/file`) won't work for scans without file indexing. Package search still works.
+**Trade-off**: File search (`syfter query -f /path/to/file`) won't work for scans without file indexing. Package search still works.

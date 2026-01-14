@@ -58,9 +58,9 @@ def seeded_server():
     print(f"Scanning: {TEST_CONTAINER}")
     print(f"="*60)
     
-    # Run rh-syfter scan against the test server
+    # Run syfter scan against the test server
     cmd = [
-        "rh-syfter",
+        "syfter",
         "--server", server_url,
         "scan",
         TEST_CONTAINER,

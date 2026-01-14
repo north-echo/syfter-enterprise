@@ -1,5 +1,5 @@
 """
-CLI interface for RH-Syfter.
+CLI interface for Syfter.
 
 Supports two modes:
 - Server mode: Uses API server (set SYFTER_SERVER env var)
@@ -108,7 +108,7 @@ def is_server_mode() -> bool:
 @click.pass_context
 def main(ctx, server_url: Optional[str], force_local: bool):
     """
-    RH-Syfter: SBOM generation and management for Red Hat products.
+    Syfter: SBOM generation and management tool.
 
     Scan RPM directories, containers, and other artifacts to generate SBOMs,
     enrich them with product metadata, and query across all your products.
@@ -184,7 +184,7 @@ def scan(
         f"[bold]Scanning:[/bold] {target}\n"
         f"[bold]Product:[/bold] {prod.full_name}\n"
         f"[bold]Mode:[/bold] {'Server' if not ctx.obj['local_mode'] else 'Local'}",
-        title="RH-Syfter Scan",
+        title="Syfter Scan",
         box=box.ROUNDED,
     ))
 
@@ -835,22 +835,22 @@ def list_contents(ctx, product, product_version, list_type, full, layers):
 
     Examples:
 
-        rh-syfter list -p rhel -v 10.0 -t files > files.txt
+        syfter list -p rhel -v 10.0 -t files > files.txt
 
-        rh-syfter list -p rhel -v 10.0 -t files | grep libssl
+        syfter list -p rhel -v 10.0 -t files | grep libssl
 
-        rh-syfter list -p rhel -v 10.0 -t packages | wc -l
+        syfter list -p rhel -v 10.0 -t packages | wc -l
 
-        rh-syfter list -p rhel -v 10.0 -t packages --full
+        syfter list -p rhel -v 10.0 -t packages --full
 
         # List packages with source layer (format: layer::package)
-        rh-syfter list -p go-toolset -v 1.25 -t packages --layers
+        syfter list -p go-toolset -v 1.25 -t packages --layers
 
         # Find packages from a specific base image
-        rh-syfter list -p go-toolset -v 1.25 -t packages --layers | grep "^ubi9/ubi::"
+        syfter list -p go-toolset -v 1.25 -t packages --layers | grep "^ubi9/ubi::"
 
         # Count packages per layer
-        rh-syfter list -p go-toolset -v 1.25 -t packages --layers | cut -d: -f1 | sort | uniq -c
+        syfter list -p go-toolset -v 1.25 -t packages --layers | cut -d: -f1 | sort | uniq -c
     """
     if layers and list_type == "files":
         console.print("[yellow]Warning: --layers only applies to packages, ignoring[/yellow]")
@@ -942,9 +942,9 @@ def show_layers(ctx, product, product_version, output_json):
 
     Examples:
 
-        rh-syfter layers -p go-toolset -v 1.25
+        syfter layers -p go-toolset -v 1.25
 
-        rh-syfter layers -p go-toolset -v 1.25 --json
+        syfter layers -p go-toolset -v 1.25 --json
     """
     if ctx.obj["local_mode"]:
         _layers_local(product, product_version, output_json)
@@ -1332,16 +1332,16 @@ def system_scan(
     Examples:
 
         # Scan the local system
-        rh-syfter system-scan
+        syfter system-scan
 
         # Scan with a tag for grouping
-        rh-syfter system-scan --tag production
+        syfter system-scan --tag production
 
         # Scan a remote host via SSH
-        rh-syfter system-scan webserver01.example.com
+        syfter system-scan webserver01.example.com
 
         # Scan remote host with specific SSH options
-        rh-syfter system-scan 192.168.1.100 -u admin -i ~/.ssh/server_key
+        syfter system-scan 192.168.1.100 -u admin -i ~/.ssh/server_key
     """
     if ctx.obj["local_mode"]:
         console.print("[yellow]System scanning requires server mode. Set SYFTER_SERVER environment variable.[/yellow]")
@@ -1376,7 +1376,7 @@ def system_scan(
         f"[bold]IP:[/bold] {host_info.get('ip_address', 'unknown')}\n"
         f"[bold]OS:[/bold] {host_info.get('os_name', '')} {host_info.get('os_version', '')}\n"
         f"[bold]Tag:[/bold] {tag or '(none)'}",
-        title="RH-Syfter System Scan",
+        title="Syfter System Scan",
         box=box.ROUNDED,
     ))
 

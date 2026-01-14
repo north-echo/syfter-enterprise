@@ -41,16 +41,16 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
 fi
 
-# Check if rh-syfter is available
-if ! command -v rh-syfter &> /dev/null; then
+# Check if syfter is available
+if ! command -v syfter &> /dev/null; then
     if python -c "import syfter" 2>/dev/null; then
         SYFTER_CMD="python -m syfter.cli"
     else
-        echo -e "${RED}Error: rh-syfter not found. Install with: pip install -e .${NC}"
+        echo -e "${RED}Error: syfter not found. Install with: pip install -e .${NC}"
         exit 1
     fi
 else
-    SYFTER_CMD="rh-syfter"
+    SYFTER_CMD="syfter"
 fi
 
 # Count lines (excluding comments and empty lines)

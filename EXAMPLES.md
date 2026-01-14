@@ -5,8 +5,8 @@ Some examples.
 Scanning the RHEL 10.0 x86_64 RPM release tree
 
 ```
-❯ time rh-syfter scan /tmp/rhel10.0/x86_64/rhsm-pulp.corp.redhat.com/content/dist/rhel10/10.0/x86_64 -p rhel -v 10.0
-╭────────────────────────────────────────────────────────────────────────────────────────────── RH-Syfter Scan ───────────────────────────────────────────────────────────────────────────────────────────────╮
+❯ time syfter scan /tmp/rhel10.0/x86_64/rhsm-pulp.corp.redhat.com/content/dist/rhel10/10.0/x86_64 -p rhel -v 10.0
+╭──────────────────────────────────────────────────────────────────────────────────────────────── Syfter Scan ────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ Scanning: /tmp/rhel10.0/x86_64/rhsm-pulp.corp.redhat.com/content/dist/rhel10/10.0/x86_64                                                                                                                    │
 │ Product: rhel-10.0                                                                                                                                                                                          │
 │ Mode: Server                                                                                                                                                                                                │
@@ -39,7 +39,7 @@ Uploading files to storage...
 Starting import job...
 Processing in background, polling for status...
 ✓ Scan #22 uploaded to server (job: 6dfcbff6-797d-4274-9959-d6dd39d63e36)
-rh-syfter scan  -p rhel -v 10.0  448.09s user 112.35s system 75% cpu 12:26.30 total
+syfter scan  -p rhel -v 10.0  448.09s user 112.35s system 75% cpu 12:26.30 total
 ```
 
 ## Scanning a container
@@ -47,9 +47,9 @@ rh-syfter scan  -p rhel -v 10.0  448.09s user 112.35s system 75% cpu 12:26.30 to
 Scanning the `multicluster-globalhub-agent` container direct from the Container Catalog:
 
 ```
-❯ time rh-syfter scan registry.redhat.io/multicluster-globalhub/multicluster-globalhub-agent-rhel9:1.4.3 \
+❯ time syfter scan registry.redhat.io/multicluster-globalhub/multicluster-globalhub-agent-rhel9:1.4.3 \
   -p multicluster-globalhub -v 1.4.3 --source skopeo
-╭────────────────────────────────────────────────────────────────────────────────────────────── RH-Syfter Scan ───────────────────────────────────────────────────────────────────────────────────────────────╮
+╭────────────────────────────────────────────────────────────────────────────────────────────── Syfter Scan ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │ Scanning: registry.redhat.io/multicluster-globalhub/multicluster-globalhub-agent-rhel9:1.4.3                                                                                                                │
 │ Product: multicluster-globalhub-1.4.3                                                                                                                                                                       │
 │ Mode: Server                                                                                                                                                                                                │
@@ -58,7 +58,7 @@ Source type: container
 Pulling image with skopeo (linux/amd64)...
 Image pulled successfully
 Using syft version: 1.40.0
-Running: syft oci-dir:/Users/redhat/tmp/rh-syfter-k_17g2go/image -o syft-json --source-name multicluster-globalhub-1.4.3 --source-version 1.4.3
+Running: syft oci-dir:/Users/redhat/tmp/syfter-k_17g2go/image -o syft-json --source-name multicluster-globalhub-1.4.3 --source-version 1.4.3
  ✔ Parsed image                                                                                                                      sha256:370faa6f0c42dc7495ca233dd47246326cbb88f4c225a7f14785085d5253b58d 
  ✔ Cataloged contents                                                                                                                       79c3507442159eb7f3106636e3f5ece58ce84e246233b233618a92b99a3e1f13 
    ├── ✔ Packages                        [233 packages]  
@@ -80,17 +80,17 @@ Uploading files to storage...
 Starting import job...
 Processing in background, polling for status...
 ✓ Scan #23 uploaded to server (job: 0afddb1a-6ebc-4c59-9f2f-0d8a32dea0cd)
-rh-syfter scan  -p multicluster-globalhub -v 1.4.3 --source skopeo  4.78s user 1.66s system 44% cpu 14.623 total
+syfter scan  -p multicluster-globalhub -v 1.4.3 --source skopeo  4.78s user 1.66s system 44% cpu 14.623 total
 ```
 
 ## Scanning a container with automatic base image tracking
 
-When scanning a multi-layer container like `go-toolset`, rh-syfter automatically detects the base image chain and determines which image contributed each package:
+When scanning a multi-layer container like `go-toolset`, syfter automatically detects the base image chain and determines which image contributed each package:
 
 ```
-❯ time rh-syfter scan registry.redhat.io/rhel9/go-toolset:1.25 \
+❯ time syfter scan registry.redhat.io/rhel9/go-toolset:1.25 \
   -p go-toolset -v 1.25 --source skopeo
-╭────────────────────────────────────────────────────────────────────────────────────────────── RH-Syfter Scan ───────────────────────────────────────────────────────────────────────────────────────────────╮
+╭────────────────────────────────────────────────────────────────────────────────────────────── Syfter Scan ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │ Scanning: registry.redhat.io/rhel9/go-toolset:1.25                                                                                                                                                          │
 │ Product: go-toolset-1.25                                                                                                                                                                                    │
 │ Mode: Server                                                                                                                                                                                                │
@@ -99,7 +99,7 @@ Source type: container
 Pulling image with skopeo (linux/amd64)...
 Image pulled successfully
 Using syft version: 1.40.0
-Running: syft oci-dir:/Users/redhat/tmp/rh-syfter-1kb9hzsi/image -o syft-json --source-name go-toolset-1.25 --source-version 1.25
+Running: syft oci-dir:/Users/redhat/tmp/syfter-1kb9hzsi/image -o syft-json --source-name go-toolset-1.25 --source-version 1.25
  ✔ Parsed image                                                                                                                      sha256:9e9d00aa4282077195e9700a4740bdf43555e79390afcb515b86226c8d2f5302 
  ✔ Cataloged contents                                                                                                                       682aab8265d43b7b9b34b556ea5cd17a587b2d259b9eee9e8ee88124de9764e1 
    ├── ✔ Packages                        [676 packages]  
@@ -136,13 +136,13 @@ Uploading files to storage...
 Starting import job...
 Processing in background, polling for status...
 ✓ Scan #41 uploaded to server (job: afd12f58-e509-4339-9415-5224b0da9446)
-rh-syfter scan registry.redhat.io/rhel9/go-toolset:1.25 -p go-toolset -v 1.25  51.16s user 18.15s system 37% cpu 3:04.02 total
+syfter scan registry.redhat.io/rhel9/go-toolset:1.25 -p go-toolset -v 1.25  51.16s user 18.15s system 37% cpu 3:04.02 total
 ```
 
 Now queries show the source image for each package:
 
 ```
-❯ time rh-syfter query -n 'go%' -p go-toolset -v 1.25
+❯ time syfter query -n 'go%' -p go-toolset -v 1.25
                             Package Search Results                             
                                                                                
   Name                    Version          Product           Source Image      
@@ -155,9 +155,9 @@ Now queries show the source image for each package:
   golang-race             1.25.3-1.el9_7   go-toolset-1.25   rhel9/go-toolset  
   golang-src              1.25.3-1.el9_7   go-toolset-1.25   rhel9/go-toolset  
                                                                                
-rh-syfter query -n 'go%' -p go-toolset -v 1.25  0.15s user 0.04s system 86% cpu 0.216 total
+syfter query -n 'go%' -p go-toolset -v 1.25  0.15s user 0.04s system 86% cpu 0.216 total
 
-❯ time rh-syfter query -n '%git' -p go-toolset -v 1.25
+❯ time syfter query -n '%git' -p go-toolset -v 1.25
                        Package Search Results                        
                                                                      
   Name          Version          Product           Source Image      
@@ -165,7 +165,7 @@ rh-syfter query -n 'go%' -p go-toolset -v 1.25  0.15s user 0.04s system 86% cpu 
   @npmcli/git   6.0.3            go-toolset-1.25   rhel9/go-toolset  
   git           2.47.3-1.el9_6   go-toolset-1.25   ubi9/s2i-base     
                                                                      
-rh-syfter query -n '%git' -p go-toolset -v 1.25  0.15s user 0.04s system 88% cpu 0.215 total
+syfter query -n '%git' -p go-toolset -v 1.25  0.15s user 0.04s system 88% cpu 0.215 total
 ```
 
 This tells you that if you need to fix a vulnerability in `gobject-introspection`, you need to update the `ubi9/ubi` base image, not the `go-toolset` container itself.  Likewise, if you're looking to fix `git` it's in the intermediary `ubi9/s2i-base` container, not the base `ubi9/ubi` or the `go-toolset` container.
@@ -175,7 +175,7 @@ This tells you that if you need to fix a vulnerability in `gobject-introspection
 Use the `layers` command to see the complete layer chain for a container:
 
 ```
-❯ time rh-syfter layers -p go-toolset -v 1.25                
+❯ time syfter layers -p go-toolset -v 1.25                
 ╭─────────────────────────────────────────────────────────────────────────────────────────── Container Layer Chain ───────────────────────────────────────────────────────────────────────────────────────────╮
 │ Container: registry.redhat.io/rhel9/go-toolset:1.25                                                                                                                                                         │
 │ Layers: 4                                                                                                                                                                                                   │
@@ -194,7 +194,7 @@ Unique source images: 4
   • ubi9/s2i-base -> registry.redhat.io/ubi9/s2i-base:1-1768264882
   • ubi9/s2i-core -> registry.redhat.io/ubi9/s2i-core:1-1767713898
   • ubi9/ubi -> registry.redhat.io/ubi9/ubi:9.7-1767674301
-rh-syfter layers -p go-toolset -v 1.25  0.16s user 0.04s system 86% cpu 0.227 total
+syfter layers -p go-toolset -v 1.25  0.16s user 0.04s system 86% cpu 0.227 total
 ```
 
 This shows the complete image chain: `ubi9/ubi` → `ubi9/s2i-core` → `ubi9/s2i-base` → `rhel9/go-toolset`, with each layer attributed to the image that introduced it. The full image references include the exact version-release tags.
@@ -204,8 +204,8 @@ This shows the complete image chain: `ubi9/ubi` → `ubi9/s2i-core` → `ubi9/s2
 Scanning the EAP 8.1 ZIP archive:
 
 ```
-❯ time rh-syfter scan -p eap -v 8.1 jboss-eap-8.1.0.zip                                                   
-╭────────────────────────────────────────────────────────────────────────────────────────────── RH-Syfter Scan ───────────────────────────────────────────────────────────────────────────────────────────────╮
+❯ time syfter scan -p eap -v 8.1 jboss-eap-8.1.0.zip                                                   
+╭────────────────────────────────────────────────────────────────────────────────────────────── Syfter Scan ───────────────────────────────────────────────────────────────────────────────────────────────╮
 │ Scanning: jboss-eap-8.1.0.zip                                                                                                                                                                               │
 │ Product: eap-8.1                                                                                                                                                                                            │
 │ Mode: Server                                                                                                                                                                                                │
@@ -233,7 +233,7 @@ Uploading files to storage...
 Starting import job...
 Processing in background, polling for status...
 ✓ Scan #24 uploaded to server (job: 8889663a-6563-4814-8e69-d9be63ba4ea8)
-rh-syfter scan -p eap -v 8.1 jboss-eap-8.1.0.zip  11.75s user 8.92s system 184% cpu 11.177 total
+syfter scan -p eap -v 8.1 jboss-eap-8.1.0.zip  11.75s user 8.92s system 184% cpu 11.177 total
 ```
 
 ## Searching for files
@@ -241,7 +241,7 @@ rh-syfter scan -p eap -v 8.1 jboss-eap-8.1.0.zip  11.75s user 8.92s system 184% 
 Searching for the `sshd` binary:
 
 ```
-❯ time rh-syfter query -f '%sbin/sshd'  
+❯ time syfter query -f '%sbin/sshd'  
                       File Search Results                       
                                                                 
   Path             Package                           Product    
@@ -253,7 +253,7 @@ Searching for the `sshd` binary:
 Searching for `libzma.so`:
 
 ```
-❯ time rh-syfter query -f '%liblzma.so' 
+❯ time syfter query -f '%liblzma.so' 
                        File Search Results                       
                                                                  
   Path                    Package                     Product    
@@ -263,7 +263,7 @@ Searching for `libzma.so`:
   /usr/lib64/liblzma.so   xz-devel-1:5.6.2-3.el10     rhel-10.1  
   /usr/lib64/liblzma.so   xz-devel-1:5.6.2-4.el10_0   rhel-10.1  
                                                                  
-rh-syfter query -f '%liblzma.so'  0.16s user 0.04s system 9% cpu 2.131 total
+syfter query -f '%liblzma.so'  0.16s user 0.04s system 9% cpu 2.131 total
 ```
 
 ## Searching for packages
@@ -271,7 +271,7 @@ rh-syfter query -f '%liblzma.so'  0.16s user 0.04s system 9% cpu 2.131 total
 Searching for the `openldap` package:
 
 ```
-❯ time rh-syfter query -n 'openldap'    
+❯ time syfter query -n 'openldap'    
                    Package Search Results                   
                                                             
   Name       Version          Product                       
@@ -286,7 +286,7 @@ Searching for the `openldap` package:
 See the statistics of what's in the database (and for reference, how big it is on-disk):
 
 ```
-❯ rh-syfter stats
+❯ syfter stats
 ╭──────────────────────────────────────────────────────────────────────────────────────────────── Statistics ─────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ Mode: Server                                                                                                                                                                                                │
 │ Database: postgresql                                                                                                                                                                                        │
@@ -303,7 +303,7 @@ See the statistics of what's in the database (and for reference, how big it is o
 Export the internal syft SBOM format from the database to all export formats:
 
 ```
-❯ time rh-syfter export -p rhel -v 10.0 -f all -o output/
+❯ time syfter export -p rhel -v 10.0 -f all -o output/
 Converting to spdx-json...
 Converting to spdx-tag-value...
 Converting to cyclonedx-json...
@@ -313,20 +313,20 @@ Converting to cyclonedx-xml...
   output/rhel-10.0.json/rhel-10.0.spdx
   output/rhel-10.0.json/rhel-10.0.cdx.json
   output/rhel-10.0.json/rhel-10.0.cdx.xml
-rh-syfter export -p rhel -v 10.0 -f all -o output/  532.54s user 20.74s system 99% cpu 9:14.95 total
+syfter export -p rhel -v 10.0 -f all -o output/  532.54s user 20.74s system 99% cpu 9:14.95 total
 ```
 
 ## System Mode (Infrastructure Scanning)
 
-RH-Syfter can also be used to scan and track packages across your infrastructure.
+Syfter can also be used to scan and track packages across your infrastructure.
 
 ### Scanning the Localhost
 
 Scan the local host and tag it for grouping:
 
 ```
-❯ rh-syfter system-scan --tag production
-╭────────────────────────────── RH-Syfter System Scan ──────────────────────────────╮
+❯ syfter system-scan --tag production
+╭────────────────────────────── Syfter System Scan ──────────────────────────────╮
 │ Scanning: localhost                                                               │
 │ Hostname: webserver01.example.com                                                 │
 │ IP: 192.168.1.50                                                                  │
@@ -344,9 +344,9 @@ Using syft version: 1.40.0
 Scan a remote host by providing the hostname or IP:
 
 ```
-❯ rh-syfter system-scan git.annvix.ca --tag personal -u vdanen
+❯ syfter system-scan git.annvix.ca --tag personal -u vdanen
 Getting info from remote host git.annvix.ca...
-╭─────────────────────────────────────────────────────────────────────────────────────────── RH-Syfter System Scan ───────────────────────────────────────────────────────────────────────────────────────────╮
+╭─────────────────────────────────────────────────────────────────────────────────────────── Syfter System Scan ───────────────────────────────────────────────────────────────────────────────────────────╮
 │ Scanning: git.annvix.ca                                                                                                                                                                                     │
 │ Hostname: git.annvix.ca                                                                                                                                                                                     │
 │ IP: git.annvix.ca                                                                                                                                                                                           │
@@ -379,7 +379,7 @@ Processing in background, polling for status...
 View all scanned systems:
 
 ```
-❯ rh-syfter systems                                            
+❯ syfter systems                                            
                                                    Systems                                                    
                                                                                                               
   Hostname         IP               Tag        OS                             Packages    Files   Last Scan   
@@ -393,7 +393,7 @@ View all scanned systems:
 Find which systems have a specific package installed:
 
 ```
-❯ rh-syfter system-query -n 'openssh-server'
+❯ syfter system-query -n 'openssh-server'
                 System Package Search Results                 
                                                               
   Name             Version         System           Tag       
@@ -407,7 +407,7 @@ Find which systems have a specific package installed:
 Find packages only in personal systems:
 
 ```
-❯ rh-syfter system-query -n 'kernel' -t personal                
+❯ syfter system-query -n 'kernel' -t personal                
               System Package Search Results              
                                                          
   Name     Version            System           Tag       
@@ -420,7 +420,7 @@ Find packages only in personal systems:
 ### Listing Packages for a Specific System
 
 ```
-❯ rh-syfter system-list -H plex.annvix.ca -t packages | head -20
+❯ syfter system-list -H plex.annvix.ca -t packages | head -20
 ModemManager-1.24.2-1.fc43
 ModemManager-glib-1.24.2-1.fc43
 NetworkManager-1:1.54.3-2.fc43
@@ -433,7 +433,7 @@ NetworkManager-bluetooth-1:1.54.3-2.fc43
 Search for specific files across your infrastructure:
 
 ```
-❯ rh-syfter system-query -f '%bin/sshd'
+❯ syfter system-query -f '%bin/sshd'
                          System File Search Results                          
                                                                              
   Path             Package                        System           Tag       

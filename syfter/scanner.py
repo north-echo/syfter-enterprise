@@ -21,9 +21,9 @@ _TEMP_DIR_MAX_AGE_SECONDS = 3600
 
 def cleanup_stale_temp_dirs():
     """
-    Clean up stale rh-syfter temp directories.
+    Clean up stale syfter temp directories.
 
-    This removes any rh-syfter-* directories in the system temp directory
+    This removes any syfter-* directories in the system temp directory
     that are older than _TEMP_DIR_MAX_AGE_SECONDS. This handles cases where
     the process crashed before cleanup could occur.
     """
@@ -33,7 +33,7 @@ def cleanup_stale_temp_dirs():
 
     try:
         for item in temp_dir.iterdir():
-            if item.is_dir() and item.name.startswith("rh-syfter-"):
+            if item.is_dir() and item.name.startswith("syfter-"):
                 try:
                     # Check directory age
                     mtime = item.stat().st_mtime
@@ -360,7 +360,7 @@ def _scan_via_skopeo(
         )
 
     # Create temp directory for OCI image (don't auto-delete, we'll clean up after scan)
-    tmpdir = tempfile.mkdtemp(prefix="rh-syfter-")
+    tmpdir = tempfile.mkdtemp(prefix="syfter-")
     oci_path = Path(tmpdir) / "image"
 
     # Register cleanup for when program exits
@@ -876,7 +876,7 @@ def _quick_scan_for_packages(
     import tempfile
 
     # Pull image first with skopeo
-    with tempfile.TemporaryDirectory(prefix="rh-syfter-base-") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="syfter-base-") as tmpdir:
         oci_path = Path(tmpdir) / "image"
 
         cmd = [

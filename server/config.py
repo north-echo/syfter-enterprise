@@ -16,7 +16,7 @@ class DatabaseConfig:
     type: Literal["sqlite", "postgresql"] = "sqlite"
 
     # SQLite settings
-    sqlite_path: Path = field(default_factory=lambda: Path("~/.rh-syfter/syfter.db").expanduser())
+    sqlite_path: Path = field(default_factory=lambda: Path("~/.syfter/syfter.db").expanduser())
 
     # PostgreSQL settings
     pg_host: str = "localhost"
@@ -55,7 +55,7 @@ class DatabaseConfig:
             return cls(
                 type="sqlite",
                 sqlite_path=Path(
-                    os.getenv("SYFTER_SQLITE_PATH", "~/.rh-syfter/syfter.db")
+                    os.getenv("SYFTER_SQLITE_PATH", "~/.syfter/syfter.db")
                 ).expanduser(),
             )
 
@@ -68,7 +68,7 @@ class StorageConfig:
     type: Literal["local", "s3"] = "local"
 
     # Local storage settings
-    local_path: Path = field(default_factory=lambda: Path("~/.rh-syfter/sboms").expanduser())
+    local_path: Path = field(default_factory=lambda: Path("~/.syfter/sboms").expanduser())
 
     # S3/MinIO settings
     s3_endpoint: Optional[str] = None  # None = AWS S3, set for MinIO
@@ -99,7 +99,7 @@ class StorageConfig:
             return cls(
                 type="local",
                 local_path=Path(
-                    os.getenv("SYFTER_LOCAL_PATH", "~/.rh-syfter/sboms")
+                    os.getenv("SYFTER_LOCAL_PATH", "~/.syfter/sboms")
                 ).expanduser(),
             )
 

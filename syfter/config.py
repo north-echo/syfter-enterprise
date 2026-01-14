@@ -16,8 +16,8 @@ class ClientConfig:
     server_url: Optional[str] = None
 
     # Local mode settings (used when server_url is None)
-    local_db_path: Path = Path("~/.rh-syfter/syfter.db")
-    local_storage_path: Path = Path("~/.rh-syfter/sboms")
+    local_db_path: Path = Path("~/.syfter/syfter.db")
+    local_storage_path: Path = Path("~/.syfter/sboms")
 
     @property
     def is_local_mode(self) -> bool:
@@ -32,10 +32,10 @@ class ClientConfig:
         return cls(
             server_url=server_url,
             local_db_path=Path(
-                os.getenv("SYFTER_LOCAL_DB", "~/.rh-syfter/syfter.db")
+                os.getenv("SYFTER_LOCAL_DB", "~/.syfter/syfter.db")
             ).expanduser(),
             local_storage_path=Path(
-                os.getenv("SYFTER_LOCAL_STORAGE", "~/.rh-syfter/sboms")
+                os.getenv("SYFTER_LOCAL_STORAGE", "~/.syfter/sboms")
             ).expanduser(),
         )
 

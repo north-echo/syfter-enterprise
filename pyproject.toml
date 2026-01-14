@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rh-syfter"
-version = "0.2.0"
-description = "SBOM generation and management tool using Syft for Red Hat products"
+name = "syfter"
+version = "0.9.0"
+description = "SBOM generation and management tool using Syft"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
@@ -47,16 +47,16 @@ dev = [
     "ruff>=0.1",
 ]
 all = [
-    "rh-syfter[server,dev]",
+    "syfter[server,dev]",
 ]
 
 [project.scripts]
-rh-syfter = "syfter.cli:main"
-rh-syfter-server = "server.main:run_server"
+syfter = "syfter.cli:main"
+syfter-server = "server.main:run_server"
 
 [project.urls]
-Homepage = "https://github.com/redhat/rh-syfter"
-Repository = "https://github.com/redhat/rh-syfter"
+Homepage = "https://github.com/redhat/syfter"
+Repository = "https://github.com/redhat/syfter"
 
 [tool.setuptools.packages.find]
 where = ["."]

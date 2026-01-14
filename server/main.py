@@ -23,10 +23,12 @@ logger = logging.getLogger(__name__)
 # Large SBOM uploads can be 500MB+ compressed
 MAX_UPLOAD_SIZE = 1024 * 1024 * 1024  # 1GB
 
+__version__ = "0.9.0"
+
 app = FastAPI(
-    title="RH-Syfter API",
-    description="SBOM generation and management API for Red Hat products",
-    version="0.2.0",
+    title="Syfter API",
+    description="SBOM generation and management API",
+    version=__version__,
 )
 
 # Add CORS middleware for browser-based clients
@@ -74,8 +76,8 @@ def root():
     """Root endpoint with API info."""
     config = get_config()
     return {
-        "name": "RH-Syfter API",
-        "version": "0.2.0",
+        "name": "Syfter API",
+        "version": __version__,
         "database": config.database.type,
         "storage": config.storage.type,
     }

@@ -66,7 +66,7 @@ def _decompress_json(data: bytes) -> dict:
     json_str = _safe_decompress(data).decode("utf-8")
     return json.loads(json_str)
 
-DEFAULT_DB_PATH = Path("~/.rh-syfter/syfter.db").expanduser()
+DEFAULT_DB_PATH = Path("~/.syfter/syfter.db").expanduser()
 
 
 class Storage:
@@ -77,7 +77,7 @@ class Storage:
         Initialize storage with database path.
 
         Args:
-            db_path: Path to SQLite database (defaults to ~/.rh-syfter/syfter.db)
+            db_path: Path to SQLite database (defaults to ~/.syfter/syfter.db)
         """
         self.db_path = db_path or DEFAULT_DB_PATH
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

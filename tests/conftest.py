@@ -1,5 +1,5 @@
 """
-Pytest configuration and shared fixtures for rh-syfter tests.
+Pytest configuration and shared fixtures for syfter tests.
 
 Usage:
     # Run tests in local mode (default, fast)
@@ -68,7 +68,7 @@ def test_data_dir() -> Path:
 @pytest.fixture(scope="session")
 def temp_dir(request) -> Generator[Path, None, None]:
     """Create a temporary directory for test artifacts."""
-    tmpdir = Path(tempfile.mkdtemp(prefix="rh-syfter-test-"))
+    tmpdir = Path(tempfile.mkdtemp(prefix="syfter-test-"))
     yield tmpdir
     
     # Clean up unless --keep-data was specified

@@ -1,6 +1,6 @@
-# RH-Syfter Data Flow
+# Syfter Data Flow
 
-This document describes how data flows through the RH-Syfter system, from input sources through processing to storage.
+This document describes how data flows through the Syfter system, from input sources through processing to storage.
 
 ## High-Level Overview (Mermaid)
 
@@ -26,7 +26,7 @@ flowchart TB
     end
 
     subgraph LocalStorage["💾 Local Storage"]
-        SQLITE[("SQLite<br/>~/.rh-syfter/syfter.db")]
+        SQLITE[("SQLite<br/>~/.syfter/syfter.db")]
     end
 
     subgraph ServerStorage["☁️ Server Storage"]
@@ -98,7 +98,7 @@ flowchart TB
 │  │  • Image layers JSON       │  │    │  │ • Jobs          │  │                     ││
 │  └────────────────────────────┘  │    │  │ • Image layers  │  │                     ││
 │                                  │    │  └─────────────────┘  └─────────────────────┘│
-│   ~/.rh-syfter/syfter.db        │    │                                               │
+│   ~/.syfter/syfter.db        │    │                                               │
 └──────────────────────────────────┘    └──────────────────────────────────────────────┘
 ```
 
@@ -106,15 +106,15 @@ flowchart TB
 
 ### 1. Input Sources
 
-RH-Syfter can scan multiple types of data sources:
+Syfter can scan multiple types of data sources:
 
 | Source Type | Description | Example |
 |-------------|-------------|---------|
 | **Directory** | Local filesystem path containing RPMs or other packages | `dir:/path/to/rpms` |
 | **Container** | Container images from registries, local daemon, or archives | `registry.redhat.io/ubi9/ubi:latest` |
 | **Archive** | Tar/zip archives containing packages | `file:product.tar.gz` |
-| **Localhost** | The local system's installed packages | `rh-syfter system-scan` |
-| **Remote Host** | Remote system via SSH | `rh-syfter system-scan webserver01` |
+| **Localhost** | The local system's installed packages | `syfter system-scan` |
+| **Remote Host** | Remote system via SSH | `syfter system-scan webserver01` |
 
 ### 2. Syft Scanner
 
@@ -168,7 +168,7 @@ The raw SBOM is transformed to add product-specific metadata:
 │                              ▼                                  │
 │   ┌───────────────────────────────────────────────────────────┐ │
 │   │ 4. ADD PRODUCT METADATA                                   │ │
-│   │    Add to descriptor.configuration.rh-syfter:             │ │
+│   │    Add to descriptor.configuration.syfter:             │ │
 │   │    • product: "rhel-10.0"                                 │ │
 │   │    • vendor: "Red Hat"                                    │ │
 │   │    • cpe_prefix, purl_qualifier                           │ │
@@ -223,7 +223,7 @@ After manipulation, package data is extracted for indexing:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                   LOCAL SQLITE STORAGE                          │
-│                   ~/.rh-syfter/syfter.db                        │
+│                   ~/.syfter/syfter.db                        │
 │                                                                 │
 │   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐       │
 │   │  products   │────▶│   scans     │◀────│  systems    │       │
@@ -305,7 +305,7 @@ After manipulation, package data is extracted for indexing:
 
 ```mermaid
 sequenceDiagram
-    participant Client as rh-syfter CLI
+    participant Client as syfter CLI
     participant API as FastAPI Server
     participant S3 as MinIO/S3
     participant PG as PostgreSQL
@@ -339,7 +339,7 @@ sequenceDiagram
 │                        QUERY FLOW                               │
 │                                                                 │
 │   User Query                                                    │
-│   rh-syfter query -n "bash" -p rhel -v 10.0                     │
+│   syfter query -n "bash" -p rhel -v 10.0                     │
 │       │                                                         │
 │       ▼                                                         │
 │   ┌─────────────────────────────────────────────────────────┐   │
@@ -370,7 +370,7 @@ sequenceDiagram
 ┌─────────────────────────────────────────────────────────────────┐
 │                       EXPORT FLOW                               │
 │                                                                 │
-│   rh-syfter export -p rhel -v 10.0 -f spdx-json                 │
+│   syfter export -p rhel -v 10.0 -f spdx-json                 │
 │       │                                                         │
 │       ▼                                                         │
 │   ┌───────────────────┐                                         │
@@ -396,7 +396,7 @@ sequenceDiagram
 
 ## Container Layer Tracking Flow
 
-For container images, RH-Syfter tracks which base image contributed each package:
+For container images, Syfter tracks which base image contributed each package:
 
 ```mermaid
 flowchart TB

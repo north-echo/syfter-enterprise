@@ -1,5 +1,5 @@
 """
-Data models for RH-Syfter.
+Data models for Syfter.
 """
 
 from dataclasses import dataclass, field

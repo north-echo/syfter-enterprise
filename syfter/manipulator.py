@@ -64,7 +64,7 @@ def modify_sbom(sbom: dict, product: Product, exclude_debug: bool = True) -> dic
         modified["descriptor"] = {}
 
     modified["descriptor"]["configuration"] = modified["descriptor"].get("configuration", {})
-    modified["descriptor"]["configuration"]["rh-syfter"] = {
+    modified["descriptor"]["configuration"]["syfter"] = {
         "product": product.full_name,
         "vendor": product.vendor,
         "cpe_prefix": product.cpe_prefix,

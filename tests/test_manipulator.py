@@ -48,9 +48,9 @@ class TestModifySbom:
         
         assert "descriptor" in modified
         assert "configuration" in modified["descriptor"]
-        assert "rh-syfter" in modified["descriptor"]["configuration"]
+        assert "syfter" in modified["descriptor"]["configuration"]
         
-        rh_config = modified["descriptor"]["configuration"]["rh-syfter"]
+        rh_config = modified["descriptor"]["configuration"]["syfter"]
         assert rh_config["product"] == "rhel-9.0"
         assert rh_config["vendor"] == "Red Hat"
     

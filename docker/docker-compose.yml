@@ -59,7 +59,7 @@ services:
       retries: 3
     restart: unless-stopped
 
-  # RH-Syfter API server
+  # Syfter API server
   api:
     build:
       context: ..

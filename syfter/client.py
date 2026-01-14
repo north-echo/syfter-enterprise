@@ -1,5 +1,5 @@
 """
-API client for communicating with the RH-Syfter server.
+API client for communicating with the Syfter server.
 """
 
 import gzip
@@ -90,7 +90,7 @@ def build_tsv_files(packages: list) -> Tuple[bytes, bytes, int, int]:
 
 
 class SyfterClient:
-    """Client for the RH-Syfter API."""
+    """Client for the Syfter API."""
 
     def __init__(self, base_url: str, timeout: float = 600.0):
         """
