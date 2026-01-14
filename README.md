@@ -19,6 +19,18 @@ RH-Syfter supports two distinct modes:
 1. **Product Mode** - Scan and manage SBOMs for software products (distros, containers, middleware)
 2. **System Mode** - Scan and track packages across your infrastructure (servers, VMs, hosts)
 
+### Two Deployment Options
+
+RH-Syfter can run in two deployment configurations:
+
+| Mode | Storage | Best For |
+|------|---------|----------|
+| **Local Mode** | SQLite (`~/.rh-syfter/syfter.db`) | Development, single-user, small scale |
+| **Server Mode** | PostgreSQL + MinIO (S3) | Production, multi-user, large scale |
+
+- **Local Mode** is the default - no setup required, just install and run
+- **Server Mode** requires running the API server with `podman-compose`
+
 ## Prerequisites
 
 - **Python 3.9+**
@@ -39,7 +51,159 @@ cd rh-syfter
 pip install -e .
 
 # Or install dependencies directly
-pip install click pyyaml rich packageurl-python
+pip install click pyyaml rich packageurl-python httpx
+```
+
+## Deployment Options
+
+### Option 1: Local Mode (Default)
+
+Local mode uses SQLite and requires no additional setup. Just install and start using:
+
+```bash
+# Scans store to ~/.rh-syfter/syfter.db
+rh-syfter scan /path/to/rpms -p myproduct -v 1.0
+rh-syfter products
+rh-syfter query -n "openssl%"
+```
+
+Local mode is great for:
+- Development and testing
+- Single-user workstations
+- Small to medium scan volumes (up to ~50 products)
+
+### Option 2: Server Mode (Distributed)
+
+Server mode uses PostgreSQL for the database and MinIO (S3-compatible) for SBOM storage. This scales to thousands of products and supports multiple concurrent users.
+
+#### Prerequisites for Server Mode
+
+- **Podman** and **podman-compose** (or Docker/docker-compose)
+  ```bash
+  # Fedora/RHEL
+  sudo dnf install podman podman-compose
+  
+  # macOS
+  brew install podman podman-compose
+  ```
+
+#### Start the Server
+
+```bash
+cd docker
+
+# Create environment file with your passwords
+cp env.example .env
+# Edit .env to set secure passwords:
+#   POSTGRES_PASSWORD=your_secure_password
+#   MINIO_ROOT_PASSWORD=your_secure_password
+
+# Start all services (PostgreSQL, MinIO, API)
+podman-compose up -d
+
+# Check status
+podman-compose ps
+
+# View logs
+podman-compose logs -f api
+```
+
+The services will be available at:
+- **API Server**: http://localhost:8000
+- **MinIO Console**: http://localhost:9001 (login with MINIO_ROOT_USER/PASSWORD)
+- **PostgreSQL**: localhost:5432
+
+#### Configure the CLI for Server Mode
+
+Set the `SYFTER_SERVER` environment variable to point to your API server:
+
+```bash
+# Add to your ~/.bashrc or ~/.zshrc
+export SYFTER_SERVER=http://localhost:8000
+
+# Or specify per-command
+rh-syfter --server http://localhost:8000 products
+```
+
+#### Server Mode Commands
+
+Once `SYFTER_SERVER` is set, all commands automatically use the server:
+
+```bash
+# These now talk to the API server
+rh-syfter scan registry.redhat.io/ubi9:latest -p ubi -v 9.0
+rh-syfter products
+rh-syfter query -n "kernel%"
+rh-syfter export -p ubi -v 9.0 -f spdx-json -o ubi9.spdx.json
+```
+
+#### Force Local Mode
+
+If `SYFTER_SERVER` is set but you want to use local SQLite:
+
+```bash
+rh-syfter --local products
+```
+
+#### Server Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     rh-syfter CLI (client)                      │
+│               SYFTER_SERVER=http://localhost:8000               │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │ HTTP API
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     RH-Syfter API Server                        │
+│                    (FastAPI, syfter-api)                        │
+└───────────────────────────────┬─────────────────────────────────┘
+           │                                    │
+           ▼                                    ▼
+┌─────────────────────┐              ┌─────────────────────┐
+│     PostgreSQL      │              │   MinIO (S3)        │
+│  (syfter-postgres)  │              │  (syfter-minio)     │
+│                     │              │                     │
+│  • Products         │              │  • Original SBOMs   │
+│  • Packages         │              │  • Modified SBOMs   │
+│  • Files            │              │  (gzip compressed)  │
+│  • Systems          │              │                     │
+└─────────────────────┘              └─────────────────────┘
+```
+
+#### Managing the Server
+
+```bash
+cd docker
+
+# Stop all services
+podman-compose down
+
+# Stop and remove volumes (DELETES ALL DATA)
+podman-compose down -v
+
+# Rebuild after code changes
+podman-compose build --no-cache api
+podman-compose up -d api
+
+# View API logs
+podman-compose logs -f api
+
+# Access PostgreSQL directly
+podman-compose exec syfter-postgres psql -U syfter -d syfter
+```
+
+#### ARM Mac Users
+
+On Apple Silicon Macs, you may need to specify the platform:
+
+```bash
+# Option 1: Set in .env
+echo "DOCKER_DEFAULT_PLATFORM=linux/arm64" >> .env
+
+# Option 2: Set environment variable
+export DOCKER_DEFAULT_PLATFORM=linux/arm64
+podman-compose up -d
 ```
 
 ## Quick Start
@@ -124,6 +288,8 @@ rh-syfter export -p rhel -v 10.0 -f all -o ./sboms/
 ## System Mode (Infrastructure Scanning)
 
 In addition to scanning products, RH-Syfter can scan hosts in your infrastructure to track installed packages across systems.
+
+> **Note:** System mode requires server mode (`SYFTER_SERVER` must be set). See [Server Mode](#option-2-server-mode-distributed) setup instructions.
 
 ### Scan the Local Host
 
@@ -267,6 +433,21 @@ Options:
   -v, --version TEXT        Product version (required)
   -t, --type [files|packages]  What to list (default: files)
   --full                    Include architecture in package output
+  --layers                  Include source layer (container scans only)
+```
+
+With `--layers`, packages are output as `source_image::package-version`:
+
+```bash
+rh-syfter list -p go-toolset -v 1.25 -t packages --layers | grep zlib
+ubi9/ubi::zlib-1.2.11-40.el9
+ubi9/s2i-base::zlib-devel-1.2.11-40.el9
+
+# Find all packages from a specific base image
+rh-syfter list -p go-toolset -v 1.25 -t packages --layers | grep "^ubi9/ubi::"
+
+# Count packages per layer
+rh-syfter list -p go-toolset -v 1.25 -t packages --layers | cut -d: -f1 | sort | uniq -c
 ```
 
 ### `rh-syfter layers`
@@ -400,15 +581,25 @@ When you scan a target, RH-Syfter:
 
 ### Storage
 
-SBOMs are stored in SQLite (`~/.rh-syfter/syfter.db`) with:
+RH-Syfter stores data in two locations:
 
+**Local Mode** (SQLite):
+- Database: `~/.rh-syfter/syfter.db`
+- SBOMs stored as compressed blobs in the database
+
+**Server Mode** (PostgreSQL + MinIO):
+- Database: PostgreSQL for indexed metadata (packages, files, products)
+- Object Storage: MinIO/S3 for compressed SBOM files
+
+Both modes store:
 - **Full SBOM preservation**: Both original and modified syft-json stored as-is
 - **Indexed packages**: Package metadata for fast querying
 - **Indexed files**: File paths and digests for lookup
+- **Container layers**: Layer-to-image mapping for container scans
 
 This dual approach allows:
-- Fast queries across all products
-- Pristine SBOM retrieval for export
+- Fast queries across all products (database)
+- Pristine SBOM retrieval for export (object storage)
 
 ### Export Formats
 
@@ -424,10 +615,28 @@ RH-Syfter uses Syft's native conversion to generate:
 
 ## Environment Variables
 
+### Client Variables
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SYFTER_DB` | Database file path (local mode) | `~/.rh-syfter/syfter.db` |
+| `SYFTER_DB` | SQLite database path (local mode) | `~/.rh-syfter/syfter.db` |
 | `SYFTER_SERVER` | API server URL (server mode) | None (uses local mode) |
+
+### Server Variables (for API container)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SYFTER_DB_TYPE` | Database type (`sqlite` or `postgresql`) | `sqlite` |
+| `SYFTER_PG_HOST` | PostgreSQL host | `localhost` |
+| `SYFTER_PG_PORT` | PostgreSQL port | `5432` |
+| `SYFTER_PG_DATABASE` | PostgreSQL database name | `syfter` |
+| `SYFTER_PG_USER` | PostgreSQL username | `syfter` |
+| `SYFTER_PG_PASSWORD` | PostgreSQL password | (required) |
+| `SYFTER_STORAGE_TYPE` | Storage type (`local` or `s3`) | `local` |
+| `SYFTER_S3_ENDPOINT` | S3/MinIO endpoint URL | (required for s3) |
+| `SYFTER_S3_BUCKET` | S3 bucket name | `syfter-sboms` |
+| `SYFTER_S3_ACCESS_KEY` | S3 access key | (required for s3) |
+| `SYFTER_S3_SECRET_KEY` | S3 secret key | (required for s3) |
 
 ## Examples
 
