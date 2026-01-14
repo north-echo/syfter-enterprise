@@ -30,6 +30,8 @@ from .scanner import (
     get_source_type,
     get_host_info,
     get_remote_host_info,
+    get_container_layer_mapping,
+    get_package_source_images,
     check_syft_installed,
     SyftNotFoundError,
     ScanError,
@@ -196,19 +198,27 @@ def scan(
             console.print(f"[dim]Found {len(image_layers)} container layers[/dim]")
             layer_map = build_layer_map(image_layers)
             
-            # Parse Containerfile for base images if provided
-            base_images = list(base_image) if base_image else []
+            # Get source image mapping from container metadata
+            # This automatically extracts which image contributed each layer
+            clean_target = target
+            for prefix in ["docker:", "podman:", "registry:", "oci-dir:", "oci-archive:"]:
+                if clean_target.startswith(prefix):
+                    clean_target = clean_target[len(prefix):]
+                    break
+            
+            source_image_map = get_container_layer_mapping(clean_target, arch=arch or "amd64")
+            
+            # Merge source image info into layer_map
+            if source_image_map:
+                for layer_id, layer_info in layer_map.items():
+                    if layer_id in source_image_map:
+                        layer_info["source_image"] = source_image_map[layer_id]
+            
+            # If user provided Containerfile, use that as override
             if containerfile:
                 parsed_images = parse_containerfile(containerfile)
                 if parsed_images:
-                    console.print(f"[dim]Parsed FROM chain: {' -> '.join(parsed_images)}[/dim]")
-                    base_images = parsed_images
-            
-            # TODO: Scan base images to build full layer mapping
-            # For now, just store the layer IDs without source image mapping
-            if base_images:
-                console.print(f"[yellow]Note: Base image layer mapping not yet implemented. "
-                            f"Layers will be tracked but source image will be unknown.[/yellow]")
+                    console.print(f"[dim]Parsed FROM chain from Containerfile: {' -> '.join(parsed_images)}[/dim]")
     
     packages = extract_packages(modified_sbom, skip_files=skip_files, layer_map=layer_map)
     
@@ -216,6 +226,27 @@ def scan(
     if layer_map:
         pkgs_with_layers = sum(1 for p in packages if p.get("layer_id"))
         console.print(f"[dim]Packages with layer info: {pkgs_with_layers}/{len(packages)}[/dim]")
+        
+        # For RPM-based containers, determine true package provenance by scanning base images
+        # This is necessary because RPM packages all appear in the top layer (where rpmdb lives)
+        if pkgs_with_layers > 0 and not containerfile:
+            # Try to determine package sources by scanning base images
+            clean_target = target
+            for prefix in ["docker:", "podman:", "registry:", "oci-dir:", "oci-archive:"]:
+                if clean_target.startswith(prefix):
+                    clean_target = clean_target[len(prefix):]
+                    break
+            
+            pkg_sources = get_package_source_images(clean_target, packages, arch=arch or "amd64")
+            if pkg_sources:
+                # Update packages with source image
+                for pkg in packages:
+                    pkg_name = pkg.get("name")
+                    if pkg_name and pkg_name in pkg_sources:
+                        pkg["source_image"] = pkg_sources[pkg_name]
+                
+                sources_filled = sum(1 for p in packages if p.get("source_image"))
+                console.print(f"[dim]Packages with source image: {sources_filled}/{len(packages)}[/dim]")
     
     if skip_files:
         console.print("[yellow]Note: File indexing skipped (--skip-files). File search won't work for this scan.[/yellow]")

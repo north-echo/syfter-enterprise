@@ -63,29 +63,35 @@ rh-syfter scan docker:ubi9/ubi:latest -p ubi -v 9.0
 
 #### Container Layer Tracking
 
-When scanning container images, rh-syfter tracks which layer each package was found in. This helps identify where a package originated in multi-stage builds:
+When scanning container images, rh-syfter **automatically** determines which base image contributed each package. This helps identify where to fix vulnerabilities in multi-stage container builds.
 
 ```bash
-# Scan a container image with layer tracking
+# Scan a container image - base image scanning is automatic
 rh-syfter scan registry.redhat.io/rhel9/go-toolset:latest -p go-toolset -v 9.0
 
-# Query packages - layer info is included
-rh-syfter query -n "golang%" --json
+# Query packages - shows source image for each package
+rh-syfter query -n "go%" -p go-toolset -v 9.0
 ```
+
+Output shows which image each package came from:
+```
+  Name                    Version          Product          Source Image      
+ ──────────────────────────────────────────────────────────────────────────── 
+  go-toolset              1.25.3-1.el9_7   go-toolset-9.0   rhel9/go-toolset  
+  gobject-introspection   1.68.0-11.el9    go-toolset-9.0   ubi9/ubi          
+  golang                  1.25.3-1.el9_7   go-toolset-9.0   rhel9/go-toolset  
+```
+
+**How it works:**
+1. Inspects the container's history to discover the base image chain
+2. Automatically scans each base image to get its package list
+3. Compares package lists to determine which image introduced each package
+4. Records `source_image` with each package in the database
 
 The JSON output includes:
 - `layer_id`: The container layer digest (truncated) where the package was found
 - `layer_index`: The position in the layer stack (0 = base layer)
-- `source_image`: The source image that contributed this package (when using `--containerfile`)
-
-To identify which base image a package came from, provide the Containerfile:
-
-```bash
-# Parse the Containerfile to extract FROM chain and map layers to images
-rh-syfter scan registry.redhat.io/rhel9/go-toolset:latest \
-  -p go-toolset -v 9.0 \
-  --containerfile /path/to/Containerfile
-```
+- `source_image`: The image that introduced this package (e.g., "ubi9/ubi", "rhel9/go-toolset")
 
 ### 3. Query Packages
 

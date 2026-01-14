@@ -386,6 +386,276 @@ def scan_archive(archive_path: Path) -> tuple[dict, str]:
     return scan_target(target)
 
 
+def get_container_layer_mapping(
+    image: str,
+    arch: str = "amd64",
+) -> dict[str, str]:
+    """
+    Extract layer-to-source-image mapping from a container image.
+    
+    Uses skopeo to inspect the image config and parses the history
+    to determine which source image contributed each layer.
+    
+    Args:
+        image: Container image reference (e.g., "registry.redhat.io/rhel9/go-toolset:latest")
+        arch: Architecture to inspect (default: amd64)
+        
+    Returns:
+        dict: Mapping of layer_id (truncated digest) to source image name
+              e.g., {"4e140ff8bd9a2": "ubi9/ubi", "abc123...": "s2i-core"}
+    """
+    import re
+    
+    skopeo_path = shutil.which("skopeo")
+    if not skopeo_path:
+        console.print("[yellow]Warning: skopeo not found, cannot extract layer mapping[/yellow]")
+        return {}
+    
+    # Get image config using skopeo
+    cmd = [
+        "skopeo", "inspect",
+        "--override-arch", arch,
+        "--override-os", "linux",
+        "--config",
+        f"docker://{image}",
+    ]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        config = json.loads(result.stdout)
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        console.print(f"[yellow]Warning: Could not inspect image config: {e}[/yellow]")
+        return {}
+    
+    # Get layer digests from rootfs
+    rootfs = config.get("rootfs", {})
+    diff_ids = rootfs.get("diff_ids", [])
+    
+    if not diff_ids:
+        return {}
+    
+    # Parse history to track image name changes
+    # Each image in a multi-stage build sets LABEL commands including 'name'
+    history = config.get("history", [])
+    
+    # Track name changes and map to layers
+    layer_mapping = {}
+    current_name = None
+    layer_idx = 0
+    
+    for h in history:
+        empty = h.get("empty_layer", False)
+        cmd = h.get("created_by", "")
+        
+        # Look for name label in the command
+        # Patterns: name="ubi9/ubi", name=ubi9/ubi, LABEL name=...
+        name_match = re.search(r'(?:LABEL\s+)?name="([^"]+)"', cmd, re.IGNORECASE)
+        if not name_match:
+            name_match = re.search(r'(?:LABEL\s+)?name=([^\s"]+)', cmd, re.IGNORECASE)
+        
+        if name_match:
+            new_name = name_match.group(1)
+            # Skip display names like "Red Hat Universal Base Image 9"
+            # Keep image paths like "ubi9/ubi", "rhel9/go-toolset"
+            if "/" in new_name or not " " in new_name:
+                current_name = new_name
+        
+        # When we hit a non-empty layer, record the current image name
+        if not empty and layer_idx < len(diff_ids):
+            layer_digest = diff_ids[layer_idx]
+            # Truncate digest for lookup key (matches what extract_packages does)
+            if layer_digest.startswith("sha256:"):
+                layer_id = layer_digest[7:20]  # First 13 chars after prefix
+            else:
+                layer_id = layer_digest[:13]
+            
+            if current_name:
+                layer_mapping[layer_id] = current_name
+            
+            layer_idx += 1
+    
+    if layer_mapping:
+        console.print(f"[dim]Extracted layer mapping for {len(layer_mapping)} layers[/dim]")
+        for layer_id, source in layer_mapping.items():
+            console.print(f"[dim]  Layer {layer_id}... -> {source}[/dim]")
+    
+    return layer_mapping
+
+
+def get_package_source_images(
+    image: str,
+    packages: list[dict],
+    arch: str = "amd64",
+) -> dict[str, str]:
+    """
+    Determine which source image each package came from by scanning base images.
+    
+    For RPM-based containers, packages are all detected from the rpmdb in the top
+    layer, so we need to scan the base images and compare package lists to determine
+    true provenance.
+    
+    Args:
+        image: Container image reference
+        packages: List of packages from the main scan
+        arch: Architecture (default: amd64)
+        
+    Returns:
+        dict: Mapping of package name to source image
+              e.g., {"bash": "ubi9/ubi", "golang": "rhel9/go-toolset"}
+    """
+    import re
+    
+    skopeo_path = shutil.which("skopeo")
+    if not skopeo_path:
+        return {}
+    
+    # Get image config to find base image chain
+    cmd = [
+        "skopeo", "inspect",
+        "--override-arch", arch,
+        "--override-os", "linux",
+        "--config",
+        f"docker://{image}",
+    ]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        config = json.loads(result.stdout)
+    except (subprocess.CalledProcessError, json.JSONDecodeError):
+        return {}
+    
+    # Extract image names from history (oldest to newest)
+    history = config.get("history", [])
+    image_chain = []
+    current_name = None
+    
+    for h in history:
+        cmd = h.get("created_by", "")
+        name_match = re.search(r'name="([^"]+)"', cmd, re.IGNORECASE)
+        if not name_match:
+            name_match = re.search(r'name=([^\s"]+)', cmd, re.IGNORECASE)
+        
+        if name_match:
+            new_name = name_match.group(1)
+            if "/" in new_name and new_name != current_name:
+                current_name = new_name
+                if current_name not in image_chain:
+                    image_chain.append(current_name)
+    
+    if len(image_chain) <= 1:
+        # Single image or couldn't determine chain
+        return {}
+    
+    console.print(f"[dim]Detected image chain: {' -> '.join(image_chain)}[/dim]")
+    console.print(f"[dim]Scanning base images to determine package provenance...[/dim]")
+    
+    # Build set of packages in the scanned image
+    scanned_packages = {pkg.get("name") for pkg in packages if pkg.get("name")}
+    
+    # Scan each base image (from oldest to newest, excluding the final image)
+    # Track which packages are "new" in each image
+    package_sources = {}
+    previous_packages = set()
+    
+    # We need to get the full registry path for base images
+    # Try to infer it from the original image
+    registry = ""
+    if "/" in image:
+        parts = image.split("/")
+        if "." in parts[0] or ":" in parts[0]:  # Looks like a registry
+            registry = parts[0] + "/"
+    
+    for base_image_name in image_chain[:-1]:  # Exclude final image
+        # Construct full image reference
+        if "/" in base_image_name and not base_image_name.startswith(registry):
+            base_ref = f"{registry}{base_image_name}"
+        else:
+            base_ref = base_image_name
+        
+        console.print(f"[dim]  Scanning base: {base_ref}...[/dim]")
+        
+        try:
+            # Quick scan just to get package list
+            base_sbom, _ = _quick_scan_for_packages(base_ref, arch)
+            base_packages = {art.get("name") for art in base_sbom.get("artifacts", []) if art.get("name")}
+            
+            # Packages in this image but not in previous = introduced by this image
+            new_packages = base_packages - previous_packages
+            for pkg_name in new_packages:
+                if pkg_name in scanned_packages:
+                    package_sources[pkg_name] = base_image_name
+            
+            previous_packages = base_packages
+            console.print(f"[dim]    Found {len(base_packages)} packages ({len(new_packages)} new)[/dim]")
+            
+        except Exception as e:
+            console.print(f"[yellow]    Could not scan base image: {e}[/yellow]")
+            continue
+    
+    # Packages not found in any base image = from the final image
+    final_image_name = image_chain[-1]
+    for pkg_name in scanned_packages:
+        if pkg_name not in package_sources:
+            package_sources[pkg_name] = final_image_name
+    
+    console.print(f"[dim]Determined source images for {len(package_sources)} packages[/dim]")
+    
+    return package_sources
+
+
+def _quick_scan_for_packages(
+    image: str,
+    arch: str = "amd64",
+) -> tuple[dict, str]:
+    """
+    Quick scan to get package list only (no file enumeration).
+    
+    Args:
+        image: Image reference
+        arch: Architecture
+        
+    Returns:
+        tuple: (SBOM dict, syft version)
+    """
+    import tempfile
+    
+    # Pull image first with skopeo
+    with tempfile.TemporaryDirectory(prefix="rh-syfter-base-") as tmpdir:
+        oci_path = Path(tmpdir) / "image"
+        
+        cmd = [
+            "skopeo", "copy",
+            "--override-os", "linux",
+            "--override-arch", arch,
+            f"docker://{image}",
+            f"oci:{oci_path}",
+        ]
+        
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise ScanError(f"Timeout pulling base image: {image}")
+        except subprocess.CalledProcessError as e:
+            raise ScanError(f"Failed to pull base image {image}: {e.stderr}")
+        
+        # Quick scan - packages only
+        syft_cmd = [
+            "syft",
+            f"oci-dir:{oci_path}",
+            "-o", "syft-json",
+            "--select-catalogers", "rpm",  # Just RPM for speed
+        ]
+        
+        try:
+            result = subprocess.run(syft_cmd, capture_output=True, text=True, check=True, timeout=120)
+            sbom = json.loads(result.stdout)
+            return sbom, "unknown"
+        except subprocess.TimeoutExpired:
+            raise ScanError(f"Timeout scanning base image: {image}")
+        except subprocess.CalledProcessError as e:
+            raise ScanError(f"Failed to scan base image {image}: {e.stderr}")
+
+
 def scan_localhost(
     show_progress: bool = True,
     exclude_debug: bool = True,
