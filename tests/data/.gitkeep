@@ -1,0 +1,4 @@
+# Test data directory
+# Add your test fixtures here:
+# - sample_sbom.json: A minimal syft-json SBOM for testing
+# - sample_rpms/: Directory containing a few RPMs for scan tests
