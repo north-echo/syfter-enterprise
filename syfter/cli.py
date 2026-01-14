@@ -30,7 +30,7 @@ from .scanner import (
     get_source_type,
     get_host_info,
     get_remote_host_info,
-    get_container_layer_mapping,
+    get_container_layer_info,
     get_package_source_images,
     check_syft_installed,
     SyftNotFoundError,
@@ -198,15 +198,19 @@ def scan(
             console.print(f"[dim]Found {len(image_layers)} container layers[/dim]")
             layer_map = build_layer_map(image_layers)
             
-            # Get source image mapping from container metadata
-            # This automatically extracts which image contributed each layer
+            # Get source image mapping and complete layer chain from container metadata
             clean_target = target
             for prefix in ["docker:", "podman:", "registry:", "oci-dir:", "oci-archive:"]:
                 if clean_target.startswith(prefix):
                     clean_target = clean_target[len(prefix):]
                     break
             
-            source_image_map = get_container_layer_mapping(clean_target, arch=arch or "amd64")
+            source_image_map, layer_chain = get_container_layer_info(clean_target, arch=arch or "amd64")
+            
+            # Store the complete layer chain for the 'layers' command
+            if layer_chain:
+                # Update image_layers with the full chain info
+                image_layers = layer_chain
             
             # Merge source image info into layer_map
             if source_image_map:
@@ -237,16 +241,57 @@ def scan(
                     clean_target = clean_target[len(prefix):]
                     break
             
-            pkg_sources = get_package_source_images(clean_target, packages, arch=arch or "amd64")
+            pkg_sources, verified_chain = get_package_source_images(clean_target, packages, arch=arch or "amd64")
             if pkg_sources:
-                # Update packages with source image
+                # Update packages with source image info
                 for pkg in packages:
                     pkg_name = pkg.get("name")
                     if pkg_name and pkg_name in pkg_sources:
-                        pkg["source_image"] = pkg_sources[pkg_name]
+                        source_info = pkg_sources[pkg_name]
+                        pkg["source_image"] = source_info.get("name")
+                        pkg["source_image_ref"] = source_info.get("full_reference")
                 
                 sources_filled = sum(1 for p in packages if p.get("source_image"))
-                console.print(f"[dim]Packages with source image: {sources_filled}/{len(packages)}[/dim]")
+                console.print(f"[green]Packages with source image: {sources_filled}/{len(packages)}[/green]")
+            
+            # Update image_layers with verified chain info
+            if verified_chain:
+                # Rebuild image_layers with accurate info from verified chain
+                target_meta = verified_chain[-1] if verified_chain else {}
+                target_layers = target_meta.get("layers", [])
+                
+                # Map each layer to the image that introduced it
+                # Layer at index N was introduced by the first image in the chain
+                # (sorted by layer count) whose layer count is > N
+                new_image_layers = []
+                for idx, layer_digest in enumerate(target_layers):
+                    if layer_digest.startswith("sha256:"):
+                        layer_id = layer_digest[7:20]
+                    else:
+                        layer_id = layer_digest[:13]
+                    
+                    # Find which image introduced this layer
+                    # It's the first image in the chain whose layer count > idx
+                    source_img = None
+                    for img_info in verified_chain:
+                        img_layer_count = img_info.get("layer_count", 0)
+                        if img_layer_count > idx:
+                            source_img = img_info
+                            break
+                    
+                    if source_img:
+                        new_image_layers.append({
+                            "layer_index": idx,
+                            "layer_id": layer_id,
+                            "full_digest": layer_digest,
+                            "source_image": source_img.get("name"),
+                            "source_version": source_img.get("version"),
+                            "source_release": source_img.get("release"),
+                            "image_reference": source_img.get("full_reference"),
+                        })
+                
+                if new_image_layers:
+                    image_layers = new_image_layers
     
     if skip_files:
         console.print("[yellow]Note: File indexing skipped (--skip-files). File search won't work for this scan.[/yellow]")
@@ -823,6 +868,126 @@ def _list_server(ctx, product, product_version, list_type, full):
     except APIError as e:
         console.print(f"[red]List failed: {e}[/red]")
         sys.exit(1)
+
+
+@main.command("layers")
+@click.option("-p", "--product", required=True, help="Product name")
+@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def show_layers(ctx, product, product_version, output_json):
+    """
+    Show container layers for a product.
+    
+    Displays the layer chain for a container image, showing which source
+    image contributed each layer. Only available for container scans.
+    
+    Examples:
+    
+        rh-syfter layers -p go-toolset -v 1.25
+        
+        rh-syfter layers -p go-toolset -v 1.25 --json
+    """
+    if ctx.obj["local_mode"]:
+        _layers_local(product, product_version, output_json)
+    else:
+        _layers_server(ctx, product, product_version, output_json)
+
+
+def _layers_local(product, product_version, output_json):
+    """Show layers using local storage."""
+    from .storage import Storage
+    
+    storage = Storage()
+    result = storage.get_product_layers(product, product_version)
+    
+    if not result:
+        console.print(f"[yellow]No layer information found for {product}-{product_version}[/yellow]")
+        console.print("[dim]Layer info is only available for container scans.[/dim]")
+        return
+    
+    _display_layers(result, output_json)
+
+
+def _layers_server(ctx, product, product_version, output_json):
+    """Show layers using server."""
+    from .client import SyfterClient, APIError
+    import httpx
+    
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            result = client.get_product_layers(product, product_version)
+            
+            if not result:
+                console.print(f"[yellow]No layer information found for {product}-{product_version}[/yellow]")
+                console.print("[dim]Layer info is only available for container scans.[/dim]")
+                return
+            
+            _display_layers(result, output_json)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        if "404" in str(e):
+            console.print(f"[yellow]No layer information found for {product}-{product_version}[/yellow]")
+            console.print("[dim]Layer info is only available for container scans.[/dim]")
+        else:
+            console.print(f"[red]Failed to get layers: {e}[/red]")
+        sys.exit(1)
+
+
+def _display_layers(result, output_json):
+    """Display layer information."""
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    
+    layers = result.get("layers", [])
+    source_path = result.get("source_path", "unknown")
+    
+    console.print(Panel(
+        f"[bold]Container:[/bold] {source_path}\n"
+        f"[bold]Layers:[/bold] {len(layers)}",
+        title="Container Layer Chain",
+        box=box.ROUNDED,
+    ))
+    
+    table = Table(box=box.SIMPLE)
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Layer ID", style="cyan", width=15)
+    table.add_column("Source Image", style="green")
+    table.add_column("Version", style="yellow")
+    table.add_column("Image Reference (copy/paste)", style="magenta")
+    
+    for layer in layers:
+        idx = layer.get("layer_index", 0)
+        layer_id = layer.get("layer_id", "")
+        source_image = layer.get("source_image") or "(unknown)"
+        source_version = layer.get("source_version") or ""
+        image_ref = layer.get("image_reference") or ""
+        
+        table.add_row(
+            str(idx),
+            layer_id,
+            source_image,
+            source_version,
+            image_ref,
+        )
+    
+    console.print(table)
+    
+    # Print summary
+    unique_images = set(l.get("source_image") for l in layers if l.get("source_image"))
+    console.print()
+    console.print(f"[dim]Unique source images: {len(unique_images)}[/dim]")
+    for img in sorted(unique_images):
+        # Find the reference for this image
+        ref = next((l.get("image_reference") for l in layers if l.get("source_image") == img), None)
+        if ref:
+            console.print(f"[dim]  • {img} -> [cyan]{ref}[/cyan][/dim]")
+        else:
+            console.print(f"[dim]  • {img}[/dim]")
 
 
 @main.command("job")

@@ -99,7 +99,7 @@ Source type: container
 Pulling image with skopeo (linux/amd64)...
 Image pulled successfully
 Using syft version: 1.40.0
-Running: syft oci-dir:/Users/redhat/tmp/rh-syfter-8w1f8y23/image -o syft-json --source-name go-toolset-1.25 --source-version 1.25
+Running: syft oci-dir:/Users/redhat/tmp/rh-syfter-1kb9hzsi/image -o syft-json --source-name go-toolset-1.25 --source-version 1.25
  ✔ Parsed image                                                                                                                      sha256:9e9d00aa4282077195e9700a4740bdf43555e79390afcb515b86226c8d2f5302 
  ✔ Cataloged contents                                                                                                                       682aab8265d43b7b9b34b556ea5cd17a587b2d259b9eee9e8ee88124de9764e1 
    ├── ✔ Packages                        [676 packages]  
@@ -110,21 +110,21 @@ Excluded 1 debug packages (debuginfo/debugsource)
 Excluded 81 debug source files
 Modified 675 artifacts with product metadata
 Found 4 container layers
-Extracted layer mapping for 4 layers
-  Layer a6cca9262fdd6... -> ubi9/ubi
-  Layer efa697a554ff9... -> ubi9/ubi
-  Layer 0ab3ef6ff04cf... -> ubi9/ubi
-  Layer 45d7e18dbaad7... -> rhel9/go-toolset
 Packages with layer info: 675/675
-Detected image chain: ubi9/ubi -> rhel9/go-toolset
+Checking 9 candidate base images...
+Verified image chain: ubi9/ubi → ubi9/s2i-core → ubi9/s2i-base → rhel9/go-toolset
 Scanning base images to determine package provenance...
-  Scanning base: registry.redhat.io/ubi9/ubi...
+  Scanning: registry.redhat.io/ubi9/ubi:9.7-1767674301...
     Found 187 packages (187 new)
+  Scanning: registry.redhat.io/ubi9/s2i-core:1-1767713898...
+    Found 204 packages (17 new)
+  Scanning: registry.redhat.io/ubi9/s2i-base:1-1768264882...
+    Found 419 packages (215 new)
 Determined source images for 624 packages
 Packages with source image: 675/675
 Preparing upload: 675 packages, 33614 files
 Creating import job...
-Job created: cf0eca5b-9d31-41c2-a0b1-9291c0022d1c
+Job created: afd12f58-e509-4339-9415-5224b0da9446
 Building TSV files...
 TSV built: packages=27.6KB, files=1148.9KB
 Compressing SBOMs...
@@ -135,8 +135,8 @@ Uploading files to storage...
   Uploading files_tsv (1148.9KB)...
 Starting import job...
 Processing in background, polling for status...
-✓ Scan #34 uploaded to server (job: cf0eca5b-9d31-41c2-a0b1-9291c0022d1c)
-rh-syfter scan registry.redhat.io/rhel9/go-toolset:1.25 -p go-toolset -v 1.25  29.20s user 10.76s system 75% cpu 53.066 total
+✓ Scan #41 uploaded to server (job: afd12f58-e509-4339-9415-5224b0da9446)
+rh-syfter scan registry.redhat.io/rhel9/go-toolset:1.25 -p go-toolset -v 1.25  51.16s user 18.15s system 37% cpu 3:04.02 total
 ```
 
 Now queries show the source image for each package:
@@ -147,7 +147,7 @@ Now queries show the source image for each package:
                                                                                
   Name                    Version          Product           Source Image      
  ───────────────────────────────────────────────────────────────────────────── 
-  go-srpm-macros          3.6.0-12.el9_7   go-toolset-1.25   rhel9/go-toolset  
+  go-srpm-macros          3.6.0-12.el9_7   go-toolset-1.25   ubi9/s2i-base     
   go-toolset              1.25.3-1.el9_7   go-toolset-1.25   rhel9/go-toolset  
   gobject-introspection   1.68.0-11.el9    go-toolset-1.25   ubi9/ubi          
   golang                  1.25.3-1.el9_7   go-toolset-1.25   rhel9/go-toolset  
@@ -155,10 +155,49 @@ Now queries show the source image for each package:
   golang-race             1.25.3-1.el9_7   go-toolset-1.25   rhel9/go-toolset  
   golang-src              1.25.3-1.el9_7   go-toolset-1.25   rhel9/go-toolset  
                                                                                
-rh-syfter query -n 'go%' -p go-toolset -v 1.25  0.15s user 0.03s system 90% cpu 0.201 total
+rh-syfter query -n 'go%' -p go-toolset -v 1.25  0.15s user 0.04s system 86% cpu 0.216 total
+
+❯ time rh-syfter query -n '%git' -p go-toolset -v 1.25
+                       Package Search Results                        
+                                                                     
+  Name          Version          Product           Source Image      
+ ─────────────────────────────────────────────────────────────────── 
+  @npmcli/git   6.0.3            go-toolset-1.25   rhel9/go-toolset  
+  git           2.47.3-1.el9_6   go-toolset-1.25   ubi9/s2i-base     
+                                                                     
+rh-syfter query -n '%git' -p go-toolset -v 1.25  0.15s user 0.04s system 88% cpu 0.215 total
 ```
 
-This tells you that if you need to fix a vulnerability in `gobject-introspection`, you need to update the `ubi9/ubi` base image, not the `go-toolset` container itself.
+This tells you that if you need to fix a vulnerability in `gobject-introspection`, you need to update the `ubi9/ubi` base image, not the `go-toolset` container itself.  Likewise, if you're looking to fix `git` it's in the intermediary `ubi9/s2i-base` container, not the base `ubi9/ubi` or the `go-toolset` container.
+
+### Viewing the container layer chain
+
+Use the `layers` command to see the complete layer chain for a container:
+
+```
+❯ time rh-syfter layers -p go-toolset -v 1.25                
+╭─────────────────────────────────────────────────────────────────────────────────────────── Container Layer Chain ───────────────────────────────────────────────────────────────────────────────────────────╮
+│ Container: registry.redhat.io/rhel9/go-toolset:1.25                                                                                                                                                         │
+│ Layers: 4                                                                                                                                                                                                   │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                              
+  #     Layer ID          Source Image       Version   Image Reference (copy/paste)                           
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────── 
+  0     a6cca9262fdd6     ubi9/ubi           9.7       registry.redhat.io/ubi9/ubi:9.7-1767674301             
+  1     efa697a554ff9     ubi9/s2i-core      1         registry.redhat.io/ubi9/s2i-core:1-1767713898          
+  2     0ab3ef6ff04cf     ubi9/s2i-base      1         registry.redhat.io/ubi9/s2i-base:1-1768264882          
+  3     45d7e18dbaad7     rhel9/go-toolset   1.25.3    registry.redhat.io/rhel9/go-toolset:1.25.3-1768393489  
+                                                                                                              
+
+Unique source images: 4
+  • rhel9/go-toolset -> registry.redhat.io/rhel9/go-toolset:1.25.3-1768393489
+  • ubi9/s2i-base -> registry.redhat.io/ubi9/s2i-base:1-1768264882
+  • ubi9/s2i-core -> registry.redhat.io/ubi9/s2i-core:1-1767713898
+  • ubi9/ubi -> registry.redhat.io/ubi9/ubi:9.7-1767674301
+rh-syfter layers -p go-toolset -v 1.25  0.16s user 0.04s system 86% cpu 0.227 total
+```
+
+This shows the complete image chain: `ubi9/ubi` → `ubi9/s2i-core` → `ubi9/s2i-base` → `rhel9/go-toolset`, with each layer attributed to the image that introduced it. The full image references include the exact version-release tags.
 
 ## Scanning a Middleware ZIP archive
 

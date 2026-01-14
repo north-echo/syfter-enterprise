@@ -254,6 +254,7 @@ class JobCreate(BaseModel):
     syft_version: Optional[str] = Field(default=None, description="Syft version used")
     total_packages: int = Field(default=0, description="Total package count")
     total_files: int = Field(default=0, description="Total file count")
+    image_layers_json: Optional[str] = Field(default=None, description="Container layer chain (JSON string)")
 
 
 class SystemJobCreate(BaseModel):

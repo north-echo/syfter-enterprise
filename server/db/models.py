@@ -246,6 +246,7 @@ class Job(Base):
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
     source_type: Mapped[str] = mapped_column(String(50), default="directory")
     syft_version: Mapped[Optional[str]] = mapped_column(String(50))
+    image_layers_json: Mapped[Optional[str]] = mapped_column(Text)  # Container layer chain
     
     # Progress tracking
     total_packages: Mapped[int] = mapped_column(Integer, default=0)

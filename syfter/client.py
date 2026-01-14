@@ -180,6 +180,13 @@ class SyfterClient:
         response = self.client.get(self._url("/scans/"), params=params)
         return self._handle_response(response)
 
+    def get_product_layers(self, product_name: str, product_version: str) -> Optional[dict]:
+        """Get container layer chain for a product."""
+        response = self.client.get(self._url(f"/products/{product_name}/{product_version}/layers"))
+        if response.status_code == 404:
+            return None
+        return self._handle_response(response)
+
     def upload_scan(
         self,
         product_name: str,
@@ -337,6 +344,7 @@ class SyfterClient:
             syft_version=syft_version,
             total_packages=total_packages,
             total_files=total_files,
+            image_layers=image_layers,
         )
         job_id = job_response["job_id"]
         console.print(f"[dim]Job created: {job_id}[/dim]")
@@ -419,19 +427,24 @@ class SyfterClient:
         syft_version: Optional[str],
         total_packages: int,
         total_files: int,
+        image_layers: Optional[List] = None,
     ) -> dict:
         """Create a new import job."""
+        payload = {
+            "product_name": product_name,
+            "product_version": product_version,
+            "source_path": source_path,
+            "source_type": source_type,
+            "syft_version": syft_version or "",
+            "total_packages": total_packages,
+            "total_files": total_files,
+        }
+        if image_layers:
+            payload["image_layers_json"] = json.dumps(image_layers)
+        
         response = self.client.post(
             self._url("/jobs"),
-            json={
-                "product_name": product_name,
-                "product_version": product_version,
-                "source_path": source_path,
-                "source_type": source_type,
-                "syft_version": syft_version or "",
-                "total_packages": total_packages,
-                "total_files": total_files,
-            },
+            json=payload,
         )
         return self._handle_response(response)
     

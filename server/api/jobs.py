@@ -61,6 +61,7 @@ async def create_job(
         syft_version=job_data.syft_version,
         total_packages=job_data.total_packages,
         total_files=job_data.total_files,
+        image_layers_json=job_data.image_layers_json,
         original_sbom_key=original_sbom_key,
         modified_sbom_key=modified_sbom_key,
         packages_tsv_key=packages_tsv_key,
@@ -510,6 +511,7 @@ def process_job(job_id: str):
             file_count=job.total_files,
             original_size_bytes=original_size,
             modified_size_bytes=modified_size,
+            image_layers_json=job.image_layers_json,
         )
         db.add(scan)
         db.commit()
