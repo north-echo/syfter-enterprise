@@ -319,7 +319,7 @@ sequenceDiagram
     API-->>Client: Return job_id + upload URLs
 
     API->>BG: Start background processing
-    
+
     BG->>S3: Stream packages.tsv
     BG->>PG: COPY INTO packages
     BG->>S3: Stream files.tsv
