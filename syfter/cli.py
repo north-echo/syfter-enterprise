@@ -34,7 +34,14 @@ from .scanner import (
     SyftNotFoundError,
     ScanError,
 )
-from .manipulator import modify_sbom, extract_packages
+from .manipulator import (
+    modify_sbom,
+    extract_packages,
+    extract_image_layers,
+    build_layer_map,
+    parse_containerfile,
+    map_layers_to_images,
+)
 from .exporter import (
     export_to_spdx_json,
     export_to_spdx_tv,
@@ -104,6 +111,8 @@ def main(ctx, server_url: Optional[str], force_local: bool):
 @click.option("-q", "--quiet", is_flag=True, help="Suppress progress output")
 @click.option("--skip-files", is_flag=True, help="Skip file indexing (faster, uses less memory)")
 @click.option("--include-debug", is_flag=True, help="Include debuginfo/debugsource packages (excluded by default)")
+@click.option("--containerfile", type=click.Path(exists=True), help="Path to Containerfile to extract base image chain")
+@click.option("--base-image", multiple=True, help="Base image reference(s) for layer mapping (repeatable)")
 @click.pass_context
 def scan(
     ctx,
@@ -122,6 +131,8 @@ def scan(
     quiet: bool,
     skip_files: bool,
     include_debug: bool,
+    containerfile: Optional[str],
+    base_image: tuple,
 ):
     """Scan a target and store the SBOM with product metadata."""
     try:
@@ -175,7 +186,36 @@ def scan(
         sys.exit(1)
 
     modified_sbom = modify_sbom(original_sbom, prod, exclude_debug=not include_debug)
-    packages = extract_packages(modified_sbom, skip_files=skip_files)
+    
+    # Extract layer information for container scans
+    layer_map = None
+    image_layers = []
+    if source_type == "container":
+        image_layers = extract_image_layers(modified_sbom)
+        if image_layers:
+            console.print(f"[dim]Found {len(image_layers)} container layers[/dim]")
+            layer_map = build_layer_map(image_layers)
+            
+            # Parse Containerfile for base images if provided
+            base_images = list(base_image) if base_image else []
+            if containerfile:
+                parsed_images = parse_containerfile(containerfile)
+                if parsed_images:
+                    console.print(f"[dim]Parsed FROM chain: {' -> '.join(parsed_images)}[/dim]")
+                    base_images = parsed_images
+            
+            # TODO: Scan base images to build full layer mapping
+            # For now, just store the layer IDs without source image mapping
+            if base_images:
+                console.print(f"[yellow]Note: Base image layer mapping not yet implemented. "
+                            f"Layers will be tracked but source image will be unknown.[/yellow]")
+    
+    packages = extract_packages(modified_sbom, skip_files=skip_files, layer_map=layer_map)
+    
+    # Count packages with layer info
+    if layer_map:
+        pkgs_with_layers = sum(1 for p in packages if p.get("layer_id"))
+        console.print(f"[dim]Packages with layer info: {pkgs_with_layers}/{len(packages)}[/dim]")
     
     if skip_files:
         console.print("[yellow]Note: File indexing skipped (--skip-files). File search won't work for this scan.[/yellow]")
@@ -189,12 +229,12 @@ def scan(
         return
 
     if ctx.obj["local_mode"]:
-        _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages)
+        _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers)
     else:
-        _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages)
+        _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers)
 
 
-def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages):
+def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers=None):
     """Store scan using local SQLite storage."""
     from .storage import Storage
 
@@ -208,11 +248,12 @@ def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, mo
         original_sbom=original_sbom,
         modified_sbom=modified_sbom,
         packages=packages,
+        image_layers=image_layers,
     )
     console.print(f"[green]✓ Scan #{scan_id} stored locally[/green]")
 
 
-def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages):
+def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers=None):
     """Store scan using API server with async job-based flow."""
     from .client import SyfterClient, APIError
     import httpx
@@ -230,6 +271,7 @@ def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, m
                 original_sbom=original_sbom,
                 modified_sbom=modified_sbom,
                 packages=packages,
+                image_layers=image_layers,
             )
             scan_id = result.get("scan_id", "unknown")
             console.print(f"[green]✓ Scan #{scan_id} uploaded to server (job: {result['id']})[/green]")
@@ -280,11 +322,19 @@ def _query_local(name, file_path, digest, product, product_version, limit, outpu
         table.add_column("Path", style="cyan")
         table.add_column("Package", style="green")
         table.add_column("Product", style="magenta")
+        # Only show source_image column if any result has it
+        has_source_image = any(row.get('source_image') for row in results)
+        if has_source_image:
+            table.add_column("Source Image", style="yellow")
         for row in results:
             pkg_info = row['package_name']
             if row.get('package_version'):
                 pkg_info += f"-{row['package_version']}"
-            table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
+            if has_source_image:
+                table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}", 
+                            row.get('source_image') or "")
+            else:
+                table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
         console.print(table)
 
     elif name:
@@ -301,8 +351,16 @@ def _query_local(name, file_path, digest, product, product_version, limit, outpu
         table.add_column("Name", style="cyan")
         table.add_column("Version", style="green")
         table.add_column("Product", style="magenta")
+        # Only show source_image column if any result has it
+        has_source_image = any(row.get('source_image') for row in results)
+        if has_source_image:
+            table.add_column("Source Image", style="yellow")
         for row in results:
-            table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
+            if has_source_image:
+                table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}",
+                            row.get('source_image') or "")
+            else:
+                table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
         console.print(table)
     else:
         console.print("[yellow]Please specify --name, --file, or --digest[/yellow]")
@@ -331,11 +389,19 @@ def _query_server(ctx, name, file_path, digest, product, product_version, limit,
                 table.add_column("Path", style="cyan")
                 table.add_column("Package", style="green")
                 table.add_column("Product", style="magenta")
+                # Only show source_image column if any result has it
+                has_source_image = any(row.get('source_image') for row in results)
+                if has_source_image:
+                    table.add_column("Source Image", style="yellow")
                 for row in results:
                     pkg_info = row['package_name']
                     if row.get('package_version'):
                         pkg_info += f"-{row['package_version']}"
-                    table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
+                    if has_source_image:
+                        table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}",
+                                    row.get('source_image') or "")
+                    else:
+                        table.add_row(row["path"], pkg_info, f"{row['product_name']}-{row['product_version']}")
                 console.print(table)
 
             elif name:
@@ -352,8 +418,16 @@ def _query_server(ctx, name, file_path, digest, product, product_version, limit,
                 table.add_column("Name", style="cyan")
                 table.add_column("Version", style="green")
                 table.add_column("Product", style="magenta")
+                # Only show source_image column if any result has it
+                has_source_image = any(row.get('source_image') for row in results)
+                if has_source_image:
+                    table.add_column("Source Image", style="yellow")
                 for row in results:
-                    table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
+                    if has_source_image:
+                        table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}",
+                                    row.get('source_image') or "")
+                    else:
+                        table.add_row(row["name"], row["version"] or "", f"{row['product_name']}-{row['product_version']}")
                 console.print(table)
             else:
                 console.print("[yellow]Please specify --name, --file, or --digest[/yellow]")

@@ -110,6 +110,9 @@ class Storage:
                     license TEXT,
                     purl TEXT,
                     cpes TEXT,
+                    layer_id TEXT,
+                    layer_index INTEGER,
+                    source_image TEXT,
                     FOREIGN KEY (scan_id) REFERENCES scans(id) ON DELETE CASCADE,
                     FOREIGN KEY (product_id) REFERENCES products(id)
                 )
@@ -203,6 +206,7 @@ class Storage:
         original_sbom: dict,
         modified_sbom: dict,
         packages: list[dict],
+        image_layers: Optional[list[dict]] = None,
     ) -> int:
         """
         Store a scan result with indexed package data.
@@ -217,6 +221,7 @@ class Storage:
             original_sbom: Original syft-json SBOM
             modified_sbom: Modified SBOM with product metadata
             packages: List of extracted package dictionaries
+            image_layers: Optional list of container layer info
 
         Returns:
             int: Scan ID
@@ -276,8 +281,9 @@ class Storage:
                 cursor.execute(
                     """
                     INSERT INTO packages (scan_id, product_id, name, version, release,
-                                         arch, epoch, source_rpm, license, purl, cpes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         arch, epoch, source_rpm, license, purl, cpes,
+                                         layer_id, layer_index, source_image)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         scan_id,
@@ -291,6 +297,9 @@ class Storage:
                         pkg.get("license", ""),
                         pkg.get("purl", ""),
                         pkg.get("cpes", "[]"),
+                        pkg.get("layer_id"),
+                        pkg.get("layer_index"),
+                        pkg.get("source_image"),
                     ),
                 )
                 package_id = cursor.lastrowid

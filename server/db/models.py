@@ -93,6 +93,10 @@ class Scan(Base):
     
     # User-provided scan label/version (for systems, defaults to scan date)
     scan_label: Mapped[Optional[str]] = mapped_column(String(100))
+    
+    # Container image metadata (for container scans)
+    image_id: Mapped[Optional[str]] = mapped_column(String(100))  # sha256 of image
+    image_layers_json: Mapped[Optional[str]] = mapped_column(Text)  # JSON: [{layer_id, index, source_image}]
 
     # Storage references (instead of storing blobs)
     original_sbom_key: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -108,11 +112,34 @@ class Scan(Base):
     product: Mapped[Optional["Product"]] = relationship(back_populates="scans")
     system: Mapped[Optional["System"]] = relationship(back_populates="scans")
     packages: Mapped[List["Package"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
+    image_layers: Mapped[List["ImageLayer"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_scan_product", "product_id"),
         Index("idx_scan_system", "system_id"),
         Index("idx_scan_timestamp", "scan_timestamp"),
+    )
+
+
+class ImageLayer(Base):
+    """ImageLayer model - maps container layer IDs to source images."""
+
+    __tablename__ = "image_layers"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
+    
+    layer_id: Mapped[str] = mapped_column(String(100), nullable=False)  # sha256 digest
+    layer_index: Mapped[int] = mapped_column(Integer, nullable=False)  # position (0=bottom)
+    source_image: Mapped[Optional[str]] = mapped_column(String(500))  # image reference
+    
+    # Relationships
+    scan: Mapped["Scan"] = relationship(back_populates="image_layers")
+
+    __table_args__ = (
+        Index("idx_image_layer_scan", "scan_id"),
+        Index("idx_image_layer_id", "layer_id"),
+        UniqueConstraint("scan_id", "layer_id", name="uq_scan_layer"),
     )
 
 
@@ -136,6 +163,11 @@ class Package(Base):
     license: Mapped[Optional[str]] = mapped_column(Text)
     purl: Mapped[Optional[str]] = mapped_column(String(1000))
     cpes: Mapped[Optional[str]] = mapped_column(Text)  # JSON array
+    
+    # Container layer tracking (for container scans)
+    layer_id: Mapped[Optional[str]] = mapped_column(String(100))  # sha256 digest of layer
+    layer_index: Mapped[Optional[int]] = mapped_column(Integer)  # position in layer stack (0=bottom)
+    source_image: Mapped[Optional[str]] = mapped_column(String(500))  # image that introduced this package
 
     # Relationships
     scan: Mapped["Scan"] = relationship(back_populates="packages")
@@ -147,6 +179,8 @@ class Package(Base):
         Index("idx_package_system", "system_id"),
         Index("idx_package_purl", "purl"),
         Index("idx_package_scan", "scan_id"),
+        Index("idx_package_layer", "layer_id"),
+        Index("idx_package_source_image", "source_image"),
     )
 
 

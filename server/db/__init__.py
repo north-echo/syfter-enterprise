@@ -2,7 +2,7 @@
 Database module - SQLAlchemy models and session management.
 """
 
-from .models import Base, Product, System, Scan, Package, File, Job
+from .models import Base, Product, System, Scan, Package, File, Job, ImageLayer
 from .session import get_db, init_db, get_engine
 
 __all__ = [
@@ -13,6 +13,7 @@ __all__ = [
     "Package",
     "File",
     "Job",
+    "ImageLayer",
     "get_db",
     "init_db",
     "get_engine",

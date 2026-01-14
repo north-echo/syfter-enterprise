@@ -61,6 +61,32 @@ rh-syfter scan registry.redhat.io/rhel9:latest -p rhel -v 9.0
 rh-syfter scan docker:ubi9/ubi:latest -p ubi -v 9.0
 ```
 
+#### Container Layer Tracking
+
+When scanning container images, rh-syfter tracks which layer each package was found in. This helps identify where a package originated in multi-stage builds:
+
+```bash
+# Scan a container image with layer tracking
+rh-syfter scan registry.redhat.io/rhel9/go-toolset:latest -p go-toolset -v 9.0
+
+# Query packages - layer info is included
+rh-syfter query -n "golang%" --json
+```
+
+The JSON output includes:
+- `layer_id`: The container layer digest (truncated) where the package was found
+- `layer_index`: The position in the layer stack (0 = base layer)
+- `source_image`: The source image that contributed this package (when using `--containerfile`)
+
+To identify which base image a package came from, provide the Containerfile:
+
+```bash
+# Parse the Containerfile to extract FROM chain and map layers to images
+rh-syfter scan registry.redhat.io/rhel9/go-toolset:latest \
+  -p go-toolset -v 9.0 \
+  --containerfile /path/to/Containerfile
+```
+
 ### 3. Query Packages
 
 ```bash

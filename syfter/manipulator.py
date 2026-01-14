@@ -289,13 +289,14 @@ def _modify_artifact_purl(artifact: dict, product: Product) -> None:
             pass
 
 
-def extract_packages(sbom: dict, skip_files: bool = False) -> list[dict]:
+def extract_packages(sbom: dict, skip_files: bool = False, layer_map: Optional[dict] = None) -> list[dict]:
     """
     Extract package information from an SBOM for indexing.
 
     Args:
         sbom: The syft-json SBOM
         skip_files: If True, don't extract file information (saves memory for large scans)
+        layer_map: Optional dict mapping layer_id -> {index, source_image} for container scans
 
     Returns:
         list: List of package dictionaries with extracted info
@@ -312,22 +313,95 @@ def extract_packages(sbom: dict, skip_files: bool = False) -> list[dict]:
         cpes = artifact.get("cpes", [])
         cpe_strings = [_get_cpe_string(cpe) for cpe in cpes]
         cpe_strings = [c for c in cpe_strings if c]  # Filter empty
+        
+        # Extract layer info from locations (for container scans)
+        layer_id = None
+        layer_index = None
+        source_image = None
+        locations = artifact.get("locations", [])
+        if locations and isinstance(locations, list):
+            for loc in locations:
+                if isinstance(loc, dict) and "layerID" in loc:
+                    layer_id = loc.get("layerID", "")
+                    # Truncate sha256: prefix if present
+                    if layer_id and layer_id.startswith("sha256:"):
+                        layer_id = layer_id[7:20]  # Keep first 13 chars after prefix
+                    break
+        
+        # Map layer_id to source image if layer_map provided
+        if layer_id and layer_map and layer_id in layer_map:
+            layer_info = layer_map[layer_id]
+            layer_index = layer_info.get("index")
+            source_image = layer_info.get("source_image")
 
         pkg = {
             "name": artifact.get("name", ""),
             "version": artifact.get("version", ""),
             "release": metadata.get("release", ""),
             "arch": metadata.get("arch", metadata.get("architecture", "")),
-            "epoch": str(metadata.get("epoch", "")),
+            "epoch": str(metadata.get("epoch") or ""),
             "source_rpm": metadata.get("sourceRpm", metadata.get("source_rpm", "")),
             "license": _extract_license(artifact),
             "purl": artifact.get("purl", ""),
             "cpes": json.dumps(cpe_strings),
             "files": [] if skip_files else _extract_files(artifact),
+            "layer_id": layer_id,
+            "layer_index": layer_index,
+            "source_image": source_image,
         }
         packages.append(pkg)
 
     return packages
+
+
+def extract_image_layers(sbom: dict) -> list[dict]:
+    """
+    Extract image layer information from a container SBOM.
+    
+    Args:
+        sbom: The syft-json SBOM
+        
+    Returns:
+        list: List of layer dicts with {layer_id, index, digest, size}
+              Empty list if not a container scan
+    """
+    layers = []
+    source = sbom.get("source", {})
+    
+    if source.get("type") != "image":
+        return layers
+    
+    metadata = source.get("metadata", {})
+    source_layers = metadata.get("layers", [])
+    
+    for index, layer in enumerate(source_layers):
+        digest = layer.get("digest", "")
+        # Truncate sha256: prefix for storage
+        layer_id = digest[7:20] if digest.startswith("sha256:") else digest[:13]
+        
+        layers.append({
+            "layer_id": layer_id,
+            "full_digest": digest,
+            "index": index,
+            "size": layer.get("size", 0),
+            "media_type": layer.get("mediaType", ""),
+            "source_image": None,  # To be filled in by layer mapping
+        })
+    
+    return layers
+
+
+def build_layer_map(layers: list[dict]) -> dict:
+    """
+    Build a lookup map from layer_id to layer info.
+    
+    Args:
+        layers: List from extract_image_layers()
+        
+    Returns:
+        dict: {layer_id: {index, source_image, ...}}
+    """
+    return {layer["layer_id"]: layer for layer in layers}
 
 
 def _extract_license(artifact: dict) -> str:
@@ -403,3 +477,79 @@ def get_product_from_purl(purl_str: str) -> Optional[tuple[str, str]]:
     except Exception:
         pass
     return None
+
+
+def parse_containerfile(path: str) -> list[str]:
+    """
+    Parse a Containerfile/Dockerfile to extract the FROM chain.
+    
+    Handles multi-stage builds by returning all FROM images in order.
+    
+    Args:
+        path: Path to Containerfile/Dockerfile
+        
+    Returns:
+        list: List of image references from FROM statements (oldest first)
+    """
+    from pathlib import Path
+    
+    images = []
+    try:
+        content = Path(path).read_text()
+        # Match FROM statements (handles ARG substitution as-is)
+        # Pattern: FROM [--platform=...] image[:tag] [AS name]
+        from_pattern = re.compile(
+            r'^FROM\s+(?:--platform=\S+\s+)?(\S+?)(?:\s+AS\s+\S+)?\s*$',
+            re.MULTILINE | re.IGNORECASE
+        )
+        
+        for match in from_pattern.finditer(content):
+            image = match.group(1)
+            # Skip ARG variables (start with $)
+            if not image.startswith("$"):
+                images.append(image)
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not parse Containerfile: {e}[/yellow]")
+    
+    return images
+
+
+def map_layers_to_images(
+    final_layers: list[dict],
+    base_image_layers: dict[str, list[dict]],
+) -> dict:
+    """
+    Map layer IDs to their source images by comparing layer lists.
+    
+    Args:
+        final_layers: Layers from the scanned image (from extract_image_layers)
+        base_image_layers: Dict of {image_ref: layers_list} for each base image
+        
+    Returns:
+        dict: Updated layer map with source_image filled in
+    """
+    layer_map = {}
+    
+    # Build a set of layer IDs for each base image
+    image_layer_sets = {}
+    for image_ref, layers in base_image_layers.items():
+        image_layer_sets[image_ref] = set(layer["layer_id"] for layer in layers)
+    
+    # For each layer in the final image, find which base image it came from
+    # Process images from most derived to base (reverse order of FROM chain)
+    # A layer belongs to the most derived image that contains it
+    
+    for layer in final_layers:
+        layer_id = layer["layer_id"]
+        layer_info = layer.copy()
+        
+        # Find the most specific image that has this layer
+        # (The image that is closest to the final image in the chain)
+        for image_ref in reversed(list(base_image_layers.keys())):
+            if layer_id in image_layer_sets[image_ref]:
+                layer_info["source_image"] = image_ref
+                break
+        
+        layer_map[layer_id] = layer_info
+    
+    return layer_map
