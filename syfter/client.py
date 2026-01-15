@@ -499,7 +499,7 @@ class SyfterClient:
             APIError: If job fails or times out
         """
         start_time = time.time()
-        last_progress = ""
+        last_desc = ""
 
         with Progress(
             SpinnerColumn(),
@@ -516,17 +516,40 @@ class SyfterClient:
 
                 job = self.get_job(job_id)
                 status = job["status"]
-
-                # Update progress display
-                if job["total_files"] > 0:
-                    pct = (job["processed_files"] / job["total_files"]) * 100
-                    desc = f"Processing: {job['processed_packages']}/{job['total_packages']} pkgs, {job['processed_files']}/{job['total_files']} files ({pct:.0f}%)"
+                
+                # Format elapsed time
+                mins, secs = divmod(int(elapsed), 60)
+                if mins > 0:
+                    elapsed_str = f"{mins}m {secs}s"
                 else:
-                    desc = f"Processing: {job['processed_packages']}/{job['total_packages']} packages"
+                    elapsed_str = f"{secs}s"
 
-                if desc != last_progress:
+                # Build progress description
+                total_pkgs = job["total_packages"]
+                total_files = job["total_files"]
+                proc_pkgs = job["processed_packages"]
+                proc_files = job["processed_files"]
+                
+                if proc_pkgs == total_pkgs and proc_files == total_files and total_pkgs > 0:
+                    # All done - show completion
+                    desc = f"✓ Imported {total_pkgs:,} packages, {total_files:,} files ({elapsed_str})"
+                elif proc_pkgs > 0 or proc_files > 0:
+                    # Some progress - show it
+                    if total_files > 0:
+                        pct = (proc_files / total_files) * 100
+                        desc = f"Importing: {proc_pkgs:,}/{total_pkgs:,} pkgs, {proc_files:,}/{total_files:,} files ({pct:.0f}%) [{elapsed_str}]"
+                    else:
+                        desc = f"Importing: {proc_pkgs:,}/{total_pkgs:,} packages [{elapsed_str}]"
+                else:
+                    # Still processing (bulk import in progress)
+                    if total_files > 0:
+                        desc = f"Importing {total_pkgs:,} packages, {total_files:,} files... [{elapsed_str}]"
+                    else:
+                        desc = f"Importing {total_pkgs:,} packages... [{elapsed_str}]"
+
+                if desc != last_desc:
                     progress.update(task, description=desc)
-                    last_progress = desc
+                    last_desc = desc
 
                 if status == "complete":
                     return job
