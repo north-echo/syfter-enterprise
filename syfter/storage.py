@@ -651,6 +651,14 @@ class Storage:
             cursor.execute("SELECT COUNT(*) as count FROM products")
             product_count = cursor.fetchone()["count"]
 
+            # Check if systems table exists (may not exist in older DBs)
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='systems'")
+            if cursor.fetchone():
+                cursor.execute("SELECT COUNT(*) as count FROM systems")
+                system_count = cursor.fetchone()["count"]
+            else:
+                system_count = 0
+
             cursor.execute("SELECT COUNT(*) as count FROM scans")
             scan_count = cursor.fetchone()["count"]
 
@@ -662,6 +670,7 @@ class Storage:
 
             return {
                 "products": product_count,
+                "systems": system_count,
                 "scans": scan_count,
                 "packages": package_count,
                 "files": file_count,

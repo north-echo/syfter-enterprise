@@ -740,6 +740,7 @@ def stats(ctx):
         f"[bold]Database:[/bold] {db_type}\n"
         f"[bold]Storage:[/bold] {storage_type}\n"
         f"[bold]Products:[/bold] {s.get('products', 0)}\n"
+        f"[bold]Systems:[/bold] {s.get('systems', 0)}\n"
         f"[bold]Scans:[/bold] {s.get('scans', 0)}\n"
         f"[bold]Packages:[/bold] {s.get('packages', 0)}\n"
         f"[bold]Files:[/bold] {s.get('files', 0)}",
