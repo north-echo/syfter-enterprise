@@ -502,7 +502,7 @@ The data flow includes several security measures:
 | Stage | Protection |
 |-------|------------|
 | **Input** | Subprocess timeouts prevent hung scans |
-| **Decompression** | 500MB size limit prevents zip bombs |
+| **Decompression** | 4GB size limit prevents zip bombs |
 | **Upload** | JSON validation, gzip format validation |
 | **Storage** | Parameterized SQL queries prevent injection |
 | **Export** | Filename sanitization in HTTP headers |

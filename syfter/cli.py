@@ -56,8 +56,8 @@ from .exporter import (
 
 console = Console()
 
-# Maximum decompressed size to prevent zip bombs (500MB)
-_MAX_DECOMPRESSED_SIZE = 500 * 1024 * 1024
+# Maximum decompressed size to prevent zip bombs (4GB for large distros like RHEL)
+_MAX_DECOMPRESSED_SIZE = 4 * 1024 * 1024 * 1024
 
 
 def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -> bytes:
@@ -75,7 +75,7 @@ def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -
             break
         total_size += len(chunk)
         if total_size > max_size:
-            raise ValueError(f"Decompressed data exceeds {max_size // (1024*1024)}MB limit")
+            raise ValueError(f"Decompressed data ({total_size // (1024*1024)}MB so far) exceeds {max_size // (1024*1024*1024)}GB limit")
         chunks.append(chunk)
 
     return b''.join(chunks)

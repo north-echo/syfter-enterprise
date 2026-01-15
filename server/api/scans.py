@@ -24,8 +24,8 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Maximum decompressed size to prevent zip bombs (500MB)
-_MAX_DECOMPRESSED_SIZE = 500 * 1024 * 1024
+# Maximum decompressed size to prevent zip bombs (4GB)
+_MAX_DECOMPRESSED_SIZE = 4 * 1024 * 1024 * 1024  # 4GB for large distros like RHEL
 
 
 def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -> bytes:
@@ -43,7 +43,7 @@ def _safe_gzip_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -
         total_size += len(chunk)
         if total_size > max_size:
             raise ValueError(
-                f"Decompressed data exceeds maximum size limit of {max_size // (1024*1024)}MB"
+                f"Decompressed data ({total_size // (1024*1024)}MB so far) exceeds maximum size limit of {max_size // (1024*1024*1024)}GB"
             )
         chunks.append(chunk)
 

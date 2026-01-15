@@ -23,8 +23,8 @@ def _compress_json(data: dict) -> bytes:
     return gzip.compress(json_str.encode("utf-8"))
 
 
-# Maximum decompressed size to prevent zip bombs (500MB)
-_MAX_DECOMPRESSED_SIZE = 500 * 1024 * 1024
+# Maximum decompressed size to prevent zip bombs (2GB)
+_MAX_DECOMPRESSED_SIZE = 4 * 1024 * 1024 * 1024  # 4GB for large distros like RHEL
 
 
 def _safe_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -> bytes:
@@ -54,7 +54,7 @@ def _safe_decompress(data: bytes, max_size: int = _MAX_DECOMPRESSED_SIZE) -> byt
         total_size += len(chunk)
         if total_size > max_size:
             raise ValueError(
-                f"Decompressed data exceeds maximum size limit of {max_size // (1024*1024)}MB"
+                f"Decompressed data ({total_size // (1024*1024)}MB so far) exceeds maximum size limit of {max_size // (1024*1024*1024)}GB"
             )
         chunks.append(chunk)
 
