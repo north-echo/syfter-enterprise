@@ -724,6 +724,14 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production deployment guidance 
 - systemd service files
 - Security considerations
 
+## Understanding Container Layers
+
+See [docs/MULTI-STAGE-BUILDS.md](docs/MULTI-STAGE-BUILDS.md) for details on:
+- How syfter handles multi-stage Docker/Podman builds
+- Why build-stage layers don't appear in final images
+- Understanding Go module detection in compiled binaries
+- File search limitations for non-package-managed files
+
 ## Development
 
 ```bash
