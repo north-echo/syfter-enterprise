@@ -49,7 +49,7 @@ Syfter can run in two deployment configurations:
 pip install syfter
 
 # Or install from source
-git clone https://github.com/redhat/syfter.git
+git clone https://github.com/vdanen/syfter.git
 cd syfter
 pip install -e .
 
@@ -229,6 +229,41 @@ syfter scan /path/to/rpms -p rhel -v 10.0 --description "Red Hat Enterprise Linu
 ```bash
 syfter scan registry.redhat.io/rhel9:latest -p rhel -v 9.0
 syfter scan docker:ubi9/ubi:latest -p ubi -v 9.0
+```
+
+#### Registry Authentication
+
+Many container registries (like `registry.redhat.io`) require authentication. Syfter uses your local container credentials, so log in before scanning:
+
+```bash
+# Red Hat Registry (requires Red Hat account)
+podman login registry.redhat.io
+
+# Quay.io (for private repos)
+podman login quay.io
+
+# Generic registry
+podman login myregistry.example.com
+```
+
+Credentials are stored in `~/.config/containers/auth.json` (or `$XDG_RUNTIME_DIR/containers/auth.json`) and are used automatically by both `podman` and `skopeo`.
+
+**For Red Hat Registry access:**
+1. Create a free account at [access.redhat.com](https://access.redhat.com)
+2. Or use a service account token from the [Red Hat Registry Service Accounts](https://access.redhat.com/terms-based-registry/) page
+
+```bash
+# Using service account (non-interactive)
+podman login registry.redhat.io \
+  --username "12345678|myserviceaccount" \
+  --password-stdin < token.txt
+```
+
+**Verify authentication:**
+```bash
+# Check if you can access the registry
+skopeo inspect --override-arch amd64 --override-os linux \
+  docker://registry.redhat.io/ubi9/ubi:latest | jq '.Name'
 ```
 
 #### Container Layer Tracking
