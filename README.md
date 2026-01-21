@@ -266,6 +266,26 @@ skopeo inspect --override-arch amd64 --override-os linux \
   docker://registry.redhat.io/ubi9/ubi:latest | jq '.Name'
 ```
 
+#### Linux Signature Lookaside Configuration
+
+On RHEL/Fedora systems, skopeo is configured to fetch image signatures from Red Hat's signature store via `/etc/containers/registries.d/registry.redhat.io.yaml`:
+
+```yaml
+docker:
+  registry.redhat.io:
+    lookaside: https://registry.redhat.io/containers/sigstore
+```
+
+This causes skopeo to fetch signatures when pulling images. When copying to OCI directory format (which syfter uses internally), skopeo would fail because OCI directories can't store signatures:
+
+```
+FATA[0002] Can not copy signatures to oci:/tmp/...: Pushing signatures for OCI images is not supported
+```
+
+Syfter handles this automatically by using `--remove-signatures` when copying images. This only affects what gets written to the temporary OCI directory - it doesn't disable signature validation. If your `policy.json` requires signature verification, that still happens during the pull; the signatures just aren't copied to the local destination.
+
+**Note:** macOS systems typically don't have this registry configuration (brew-installed skopeo doesn't include it), so this issue only appears on Linux.
+
 #### Container Layer Tracking
 
 When scanning container images, syfter **automatically** determines which base image contributed each package. This helps identify where to fix vulnerabilities in multi-stage container builds.

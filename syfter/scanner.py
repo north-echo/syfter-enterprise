@@ -377,10 +377,12 @@ def _scan_via_skopeo(
     # Pull image to OCI directory format
     # Use --override-os linux to ensure we get Linux containers (not darwin)
     # Use --override-arch to specify architecture
+    # Use --remove-signatures because OCI format doesn't support storing signatures
     cmd = [
         "skopeo", "copy",
         "--override-os", "linux",
         "--override-arch", target_arch,
+        "--remove-signatures",
         f"docker://{image}",
         f"oci:{oci_path}",
     ]
@@ -883,6 +885,7 @@ def _quick_scan_for_packages(
             "skopeo", "copy",
             "--override-os", "linux",
             "--override-arch", arch,
+            "--remove-signatures",
             f"docker://{image}",
             f"oci:{oci_path}",
         ]
