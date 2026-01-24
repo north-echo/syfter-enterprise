@@ -30,7 +30,7 @@ This guide covers deploying the Syfter server and clients for production use.
 The easiest way to deploy is using Podman Compose:
 
 ```bash
-cd docker
+cd podman
 
 # Create .env file with secrets
 cat > .env << EOF
@@ -54,7 +54,7 @@ The API will be available at http://localhost:8000
 For better performance on ARM Macs, use native ARM64 containers:
 
 ```bash
-cd docker
+cd podman
 
 # Set platform to ARM64
 export DOCKER_DEFAULT_PLATFORM=linux/arm64

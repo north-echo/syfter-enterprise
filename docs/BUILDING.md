@@ -119,7 +119,7 @@ twine upload --repository-url https://pypi.internal.example.com/simple/ dist/*
 For lightweight client-only deployments:
 
 ```dockerfile
-# Dockerfile.client
+# Containerfile.client
 FROM registry.access.redhat.com/ubi9/python-311:latest
 
 WORKDIR /app
@@ -143,7 +143,7 @@ Build:
 python -m build
 
 # Build container
-podman build -f Dockerfile.client -t syfter-client:0.9.0 .
+podman build -f Containerfile.client -t syfter-client:0.9.0 .
 ```
 
 Usage:
@@ -157,11 +157,11 @@ podman run --rm \
 
 ### Build Server Image
 
-The server image is built via the existing `docker/Dockerfile`:
+The server image is built via the existing `podman/Containerfile`:
 
 ```bash
-cd docker
-podman build -t syfter-server:0.9.0 .
+cd podman
+podman build -f Containerfile -t syfter-server:0.9.0 ..
 ```
 
 ### Multi-Architecture Builds

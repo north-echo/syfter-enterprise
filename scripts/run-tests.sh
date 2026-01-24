@@ -15,7 +15,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-DOCKER_DIR="$PROJECT_DIR/docker"
+PODMAN_DIR="$PROJECT_DIR/podman"
 
 cd "$PROJECT_DIR"
 
@@ -54,7 +54,7 @@ ensure_pytest() {
 # Start the test stack
 start_test_stack() {
     echo_info "Starting test stack on port 18000..."
-    cd "$DOCKER_DIR"
+    cd "$PODMAN_DIR"
     
     # Build and start
     podman-compose -f docker-compose.test.yml up -d --build
@@ -81,7 +81,7 @@ start_test_stack() {
 # Stop the test stack
 stop_test_stack() {
     echo_info "Stopping test stack..."
-    cd "$DOCKER_DIR"
+    cd "$PODMAN_DIR"
     podman-compose -f docker-compose.test.yml down -v
 }
 
@@ -101,7 +101,7 @@ case "$MODE" in
         # Check if server is running
         if ! curl -sf "$SERVER_URL/health" > /dev/null 2>&1; then
             echo_error "Server not running at $SERVER_URL"
-            echo_info "Start the server with: cd docker && podman-compose up -d"
+            echo_info "Start the server with: cd podman && podman-compose up -d"
             echo_info "Or use 'server-isolated' to start a separate test stack"
             exit 1
         fi

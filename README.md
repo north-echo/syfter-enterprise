@@ -121,7 +121,7 @@ Server mode uses PostgreSQL for the database and MinIO (S3-compatible) for SBOM 
 #### Start the Server
 
 ```bash
-cd docker
+cd podman
 
 # Create environment file with your passwords
 cp env.example .env
@@ -205,7 +205,7 @@ syfter --local products
 #### Managing the Server
 
 ```bash
-cd docker
+cd podman
 
 # Stop all services
 podman-compose down
@@ -214,8 +214,8 @@ podman-compose down
 podman-compose down -v
 
 # Rebuild after code changes
-podman-compose build --no-cache syfter-api
-podman-compose up -d syfter-api
+podman-compose build --no-cache api
+podman-compose up -d api
 
 # View API logs
 podman-compose logs -f syfter-api
