@@ -831,3 +831,18 @@ ruff check syfter/
 ## License
 
 Apache License 2.0
+
+## Vibe Coding Notice
+
+In all transparency, this code was almost entirely written with AI.  While
+I can program in Python, I didn't really have the time to do it so
+leveraged AI for it.  If there are issues (and there probably are!) feel
+free to create a PR with a fix.  The intent behind this project was to
+create something _quickly_ that would solve some challenges around the
+production and use of SBOMs.  It's very complicated which is why it
+leverages [Syft](https://github.com/anchore/syft) (why reinvent the
+wheel?).
+
+If using AI generated is scary or offensive, there are probably other
+things you can use.  If it isn't, this may solve the challenges you have
+that it's solving for me.
