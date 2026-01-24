@@ -70,7 +70,7 @@ pip install "syfter[server]"
 ### From Source
 
 ```bash
-git clone https://github.com/redhat/syfter.git
+git clone https://github.com/vdanen/syfter.git
 cd syfter
 
 # Using uv

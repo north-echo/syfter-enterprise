@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "Red Hat", email = "sbom@redhat.com"}
+    {name = "Vincent Danen", email = "vdanen@redhat.com"}
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -55,8 +55,8 @@ syfter = "syfter.cli:main"
 syfter-server = "server.main:run_server"
 
 [project.urls]
-Homepage = "https://github.com/redhat/syfter"
-Repository = "https://github.com/redhat/syfter"
+Homepage = "https://github.com/vdanen/syfter"
+Repository = "https://github.com/vdanen/syfter"
 
 [tool.setuptools.packages.find]
 where = ["."]
