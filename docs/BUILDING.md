@@ -4,7 +4,7 @@ This guide covers building syfter for distribution to client environments.
 
 ## Version
 
-Current version: **0.9.0**
+Current version: **0.9.0.1**
 
 Version is defined in:
 - `pyproject.toml` - Package metadata

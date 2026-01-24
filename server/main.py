@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Large SBOM uploads can be 500MB+ compressed
 MAX_UPLOAD_SIZE = 1024 * 1024 * 1024  # 1GB
 
-__version__ = "0.9.0"
+__version__ = "0.9.0.1"
 
 app = FastAPI(
     title="Syfter API",
