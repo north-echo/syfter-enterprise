@@ -2,7 +2,7 @@
 
 SBOM generation and management tool using [Syft](https://github.com/anchore/syft).
 
-**Version: 0.9.0**
+**Version: 0.9.0.1**
 
 ## Overview
 
