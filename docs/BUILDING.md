@@ -24,21 +24,28 @@ Syfter can be distributed in several ways:
 
 ---
 
-## 1. Python Package (wheel)
+## 1. Python Package (PyPI / wheel)
 
 ### Prerequisites
 
 ```bash
-# Install build tools
+# Option A: Using uv (recommended)
+# Install uv if not already installed
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Option B: Using traditional tools
 pip install build twine
 ```
 
-### Build the Wheel
+### Build the Package
 
 ```bash
 cd /path/to/syfter
 
-# Build both sdist and wheel
+# Using uv (recommended)
+uv build
+
+# Or using traditional tools
 python -m build
 
 # Output will be in dist/
@@ -47,7 +54,34 @@ ls dist/
 # syfter-0.9.0-py3-none-any.whl
 ```
 
-### Install from Wheel
+### Install as a CLI Tool (uv)
+
+The recommended way to install syfter as a standalone CLI tool:
+
+```bash
+# Install from PyPI (after publishing)
+uv tool install syfter
+
+# Install with server components
+uv tool install "syfter[server]"
+
+# Install from local directory (for testing)
+uv tool install .
+
+# Install from local wheel
+uv tool install dist/syfter-0.9.0-py3-none-any.whl
+
+# Install from GitHub
+uv tool install git+https://github.com/redhat/syfter
+
+# Upgrade to latest version
+uv tool upgrade syfter
+
+# Uninstall
+uv tool uninstall syfter
+```
+
+### Install with pip
 
 ```bash
 # Client-only installation (CLI + local SQLite)
@@ -60,15 +94,21 @@ pip install "syfter-0.9.0-py3-none-any.whl[server]"
 pip install "syfter-0.9.0-py3-none-any.whl[all]"
 ```
 
-### Publish to PyPI (Internal/Public)
+### Publish to PyPI
 
 ```bash
-# Upload to PyPI (requires credentials)
+# Using uv (recommended)
+uv publish
+
+# Or using twine
 twine upload dist/*
 
-# Or upload to internal PyPI server
+# Upload to internal PyPI server
 twine upload --repository-url https://pypi.internal.example.com/simple/ dist/*
 ```
+
+> **Note:** Publishing requires a PyPI account. Create one at https://pypi.org/account/register/
+> and generate an API token at https://pypi.org/manage/account/token/
 
 ---
 
@@ -308,6 +348,32 @@ sudo mv syft-linux-amd64 /usr/local/bin/syft
 
 For contributors and testing:
 
+### Using uv (recommended)
+
+```bash
+# Clone repository
+git clone https://github.com/redhat/syfter.git
+cd syfter
+
+# Create virtual environment and install dependencies
+uv venv
+source .venv/bin/activate
+uv pip install -e ".[all]"
+
+# Or use uv sync if you have a uv.lock file
+uv sync --all-extras
+
+# Verify installation
+syfter --version
+# syfter version 0.9.0
+
+# Run tests
+./scripts/run-tests.sh local
+./scripts/run-tests.sh coverage
+```
+
+### Using pip
+
 ```bash
 # Clone repository
 git clone https://github.com/redhat/syfter.git
@@ -435,4 +501,23 @@ syfter stats
 # Test server mode
 export SYFTER_SERVER=http://your-server:8000
 syfter stats
+```
+
+## Quick Start for End Users
+
+Once published to PyPI, end users can install and use syfter with:
+
+```bash
+# Install using uv (recommended - isolated tool installation)
+uv tool install syfter
+
+# Or install using pipx (alternative isolated installation)
+pipx install syfter
+
+# Or install using pip (into current environment)
+pip install syfter
+
+# Verify it works
+syfter --version
+syfter check
 ```

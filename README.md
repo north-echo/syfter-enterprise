@@ -44,21 +44,46 @@ Syfter can run in two deployment configurations:
 
 ## Installation
 
+### Using uv (recommended)
+
 ```bash
-# Install from PyPI (when published)
+# Install as a standalone CLI tool (isolated environment)
+uv tool install syfter
+
+# Or install with server components
+uv tool install "syfter[server]"
+
+# Upgrade to latest version
+uv tool upgrade syfter
+```
+
+### Using pip
+
+```bash
+# Install from PyPI
 pip install syfter
 
-# Or install from source
-git clone https://github.com/vdanen/syfter.git
+# Install with server components
+pip install "syfter[server]"
+```
+
+### From Source
+
+```bash
+git clone https://github.com/redhat/syfter.git
 cd syfter
+
+# Using uv
+uv tool install .
+
+# Or using pip
 pip install -e .
 
-# Install with server components
-pip install -e ".[server]"
-
-# Install with development tools
+# Install with all components (server + dev tools)
 pip install -e ".[all]"
 ```
+
+See [docs/BUILDING.md](docs/BUILDING.md) for detailed build and distribution options.
 
 ## Deployment Options
 
