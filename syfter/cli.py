@@ -670,6 +670,18 @@ def _do_export(sbom, product, product_version, output_format, output):
         sys.exit(1)
 
 
+def _format_source_type(source_type: str) -> str:
+    """Format source type for display with user-friendly labels."""
+    labels = {
+        "container": "image",
+        "directory": "RPMs",
+        "archive": "zip/tar",
+        "file": "file",
+        "host": "system",
+    }
+    return labels.get(source_type, source_type or "unknown")
+
+
 @main.command("products")
 @click.pass_context
 def list_products(ctx):
@@ -696,20 +708,71 @@ def list_products(ctx):
     table = Table(title="Products", box=box.SIMPLE)
     table.add_column("Name", style="cyan")
     table.add_column("Version", style="green")
+    table.add_column("Type", style="magenta")
     table.add_column("Scans", justify="right")
     table.add_column("Packages", justify="right")
     table.add_column("Files", justify="right")
 
     for p in products:
         total_files = p.get("total_files", 0) if isinstance(p, dict) else getattr(p, "total_files", 0)
+        source_type = p.get("source_type") if isinstance(p, dict) else getattr(p, "source_type", None)
         table.add_row(
             p["name"] if isinstance(p, dict) else p.name,
             p["version"] if isinstance(p, dict) else p.version,
+            _format_source_type(source_type),
             str(p.get("scan_count", 0) if isinstance(p, dict) else getattr(p, "scan_count", 0)),
             str(p.get("total_packages", 0) if isinstance(p, dict) else getattr(p, "total_packages", 0)),
             f"{total_files:,}" if total_files else "0",
         )
     console.print(table)
+
+
+@main.command("delete")
+@click.option("-p", "--product", required=True, help="Product name")
+@click.option("-v", "--version", "product_version", required=True, help="Product version")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def delete_product_cmd(ctx, product, product_version, yes):
+    """Delete a product and all its scans.
+
+    This permanently removes the product, all its scans, packages, and file records.
+
+    Example:
+        syfter delete -p myproduct -v 1.0
+        syfter delete -p myproduct -v 1.0 --yes  # Skip confirmation
+    """
+    # Confirm deletion unless --yes is provided
+    if not yes:
+        confirm = click.confirm(
+            f"Delete product '{product}-{product_version}' and all its data?",
+            default=False
+        )
+        if not confirm:
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+
+    if ctx.obj["local_mode"]:
+        from .storage import Storage
+        storage = Storage()
+        deleted = storage.delete_product(product, product_version)
+        if deleted:
+            console.print(f"[green]✓ Deleted {product}-{product_version}[/green]")
+        else:
+            console.print(f"[red]Product {product}-{product_version} not found[/red]")
+            sys.exit(1)
+    else:
+        import httpx
+        from .client import SyfterClient, APIError
+        try:
+            with SyfterClient(ctx.obj["server_url"]) as client:
+                client.delete_product(product, product_version)
+                console.print(f"[green]✓ Deleted {product}-{product_version}[/green]")
+        except httpx.ConnectError:
+            console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+            sys.exit(1)
+        except APIError as e:
+            console.print(f"[red]Delete failed: {e}[/red]")
+            sys.exit(1)
 
 
 @main.command("stats")

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..db import get_db, Product, Scan, Package, File
+from ..db import get_db, Product, Scan, Package, File, ImageLayer, Job
 from .schemas import ProductCreate, ProductResponse
 
 router = APIRouter()
@@ -26,6 +26,15 @@ def list_products(db: Session = Depends(get_db)):
         total_packages = db.query(func.count(Package.id)).filter(Package.product_id == product.id).scalar() or 0
         total_files = db.query(func.count(File.id)).filter(File.product_id == product.id).scalar() or 0
 
+        # Get source_type from the most recent scan
+        latest_scan = (
+            db.query(Scan)
+            .filter(Scan.product_id == product.id)
+            .order_by(Scan.scan_timestamp.desc())
+            .first()
+        )
+        source_type = latest_scan.source_type if latest_scan else None
+
         products.append(ProductResponse(
             id=product.id,
             name=product.name,
@@ -39,6 +48,7 @@ def list_products(db: Session = Depends(get_db)):
             scan_count=scan_count,
             total_packages=total_packages,
             total_files=total_files,
+            source_type=source_type,
         ))
 
     return products
@@ -157,7 +167,9 @@ def get_product_layers(product_name: str, product_version: str, db: Session = De
 
 @router.delete("/{product_name}/{product_version}", status_code=204)
 def delete_product(product_name: str, product_version: str, db: Session = Depends(get_db)):
-    """Delete a product and all its scans."""
+    """Delete a product and all its scans, packages, and files."""
+    from sqlalchemy import text
+
     product = (
         db.query(Product)
         .filter(Product.name == product_name, Product.version == product_version)
@@ -166,5 +178,39 @@ def delete_product(product_name: str, product_version: str, db: Session = Depend
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    db.delete(product)
+    product_id = product.id
+
+    # Use raw SQL to ensure proper deletion order
+    # Delete in order to respect foreign key constraints:
+    # jobs (by scan_id) -> jobs (by product_id) -> files -> packages -> image_layers -> scans -> product
+    
+    # Delete jobs that reference scans for this product
+    db.execute(text("""
+        DELETE FROM jobs WHERE scan_id IN (
+            SELECT id FROM scans WHERE product_id = :product_id
+        )
+    """), {"product_id": product_id})
+    
+    # Delete jobs that reference the product directly
+    db.execute(text("DELETE FROM jobs WHERE product_id = :product_id"), {"product_id": product_id})
+    
+    # Delete files
+    db.execute(text("DELETE FROM files WHERE product_id = :product_id"), {"product_id": product_id})
+    
+    # Delete packages
+    db.execute(text("DELETE FROM packages WHERE product_id = :product_id"), {"product_id": product_id})
+    
+    # Delete image layers
+    db.execute(text("""
+        DELETE FROM image_layers WHERE scan_id IN (
+            SELECT id FROM scans WHERE product_id = :product_id
+        )
+    """), {"product_id": product_id})
+    
+    # Delete scans
+    db.execute(text("DELETE FROM scans WHERE product_id = :product_id"), {"product_id": product_id})
+    
+    # Delete product
+    db.execute(text("DELETE FROM products WHERE id = :product_id"), {"product_id": product_id})
+    
     db.commit()

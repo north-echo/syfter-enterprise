@@ -68,6 +68,7 @@ class ProductResponse(BaseModel):
     scan_count: int = 0
     total_packages: int = 0
     total_files: int = 0
+    source_type: Optional[str] = None  # Type of scan: directory, container, archive, etc.
 
     class Config:
         from_attributes = True

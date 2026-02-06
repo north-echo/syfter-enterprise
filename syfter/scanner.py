@@ -1158,12 +1158,18 @@ def get_source_type(target: str) -> str:
     Returns:
         str: Source type (directory, container, archive, etc.)
     """
+    # Archive file extensions (case-insensitive)
+    archive_suffixes = {".tar", ".gz", ".tgz", ".zip", ".tar.gz", ".tar.xz", ".tar.bz2"}
+
+    def _is_archive_suffix(suffix: str) -> bool:
+        return suffix.lower() in archive_suffixes
+
     # Check explicit prefixes first
     if target.startswith("dir:"):
         return "directory"
     elif target.startswith("file:"):
         path = Path(target[5:])
-        if path.suffix in (".tar", ".gz", ".tgz", ".zip"):
+        if _is_archive_suffix(path.suffix):
             return "archive"
         return "file"
     elif target.startswith(("docker:", "podman:", "registry:", "oci-dir:", "oci-archive:", "docker-archive:")):
@@ -1175,9 +1181,14 @@ def get_source_type(target: str) -> str:
     if path.is_dir():
         return "directory"
     elif path.is_file():
-        if path.suffix in (".tar", ".gz", ".tgz", ".zip"):
+        if _is_archive_suffix(path.suffix):
             return "archive"
         return "file"
+
+    # Even if the file doesn't exist, check the extension
+    # This handles cases where the file was deleted or path is relative
+    if _is_archive_suffix(path.suffix):
+        return "archive"
 
     # Only check for container image if it's not a filesystem path
     if _looks_like_container_image(target):

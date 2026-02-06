@@ -283,6 +283,12 @@ class SyfterClient:
         if response.status_code >= 400:
             self._handle_response(response)
 
+    def delete_product(self, product_name: str, product_version: str) -> None:
+        """Delete a product and all its scans."""
+        response = self.client.delete(self._url(f"/products/{product_name}/{product_version}"))
+        if response.status_code >= 400:
+            self._handle_response(response)
+
     # Job-based upload operations (for large scans)
     def upload_scan_async(
         self,
