@@ -4,9 +4,14 @@ FROM python:3.13-slim
 WORKDIR /app
 
 # Install system dependencies
+# wget and syft are optional — needed only for server-side remote scanning
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    wget \
     && rm -rf /var/lib/apt/lists/*
+
+# Install syft for server-side scanning
+RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
 # Copy requirements first for caching
 COPY pyproject.toml .
