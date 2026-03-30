@@ -5,6 +5,7 @@ API client for communicating with the Syfter server.
 import gzip
 import io
 import json
+import os
 import time
 from pathlib import Path
 from typing import Optional, Tuple, List
@@ -103,11 +104,24 @@ class SyfterClient:
         self.base_url = base_url.rstrip("/")
         self.api_url = f"{self.base_url}/api/v1"
         self.timeout = timeout
+
+        # Build default headers
+        headers = {}
+
+        # Support API key auth via SYFTER_API_KEY env var
+        api_key = os.environ.get("SYFTER_API_KEY")
+        if api_key:
+            headers["X-API-Key"] = api_key
+
+        self._api_key = api_key
+        self._headers = headers
+
         # Use longer timeouts for uploads - large SBOMs can take minutes
         # Force HTTP/1.1 for large uploads - HTTP/2 can have issues with very large requests
         self.client = httpx.Client(
             timeout=httpx.Timeout(timeout, connect=30.0, read=timeout, write=timeout),
             http2=False,  # Disable HTTP/2 for more reliable large uploads
+            headers=headers,
         )
 
     def _url(self, path: str) -> str:
@@ -263,6 +277,10 @@ class SyfterClient:
                 "--connect-timeout", "30",
                 "--max-time", "10800",  # 3 hours max for very large uploads
             ]
+
+            # Pass API key header to curl if set
+            if self._api_key:
+                curl_cmd.extend(["-H", f"X-API-Key: {self._api_key}"])
 
             result = subprocess.run(curl_cmd, capture_output=True, text=True)
 
@@ -906,7 +924,5 @@ def get_client(server_url: Optional[str] = None) -> SyfterClient:
     Returns:
         SyfterClient: Client instance
     """
-    import os
-
     url = server_url or os.getenv("SYFTER_SERVER", "http://localhost:8000")
     return SyfterClient(url)
