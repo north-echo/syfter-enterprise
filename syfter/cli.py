@@ -390,6 +390,7 @@ def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, m
 
 @main.command("query")
 @click.option("-n", "--name", help="Package name pattern (use %% as wildcard)")
+@click.option("--pkg-version", help="Package version pattern (use %% as wildcard)")
 @click.option("-f", "--file", "file_path", help="File path pattern")
 @click.option("-d", "--digest", help="File digest (exact match)")
 @click.option("-p", "--product", help="Filter by product name")
@@ -397,15 +398,15 @@ def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, m
 @click.option("--limit", type=int, default=50, help="Maximum results")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def query(ctx, name, file_path, digest, product, product_version, limit, output_json):
+def query(ctx, name, pkg_version, file_path, digest, product, product_version, limit, output_json):
     """Query packages and files across all products."""
     if ctx.obj["local_mode"]:
-        _query_local(name, file_path, digest, product, product_version, limit, output_json)
+        _query_local(name, pkg_version, file_path, digest, product, product_version, limit, output_json)
     else:
-        _query_server(ctx, name, file_path, digest, product, product_version, limit, output_json)
+        _query_server(ctx, name, pkg_version, file_path, digest, product, product_version, limit, output_json)
 
 
-def _query_local(name, file_path, digest, product, product_version, limit, output_json):
+def _query_local(name, pkg_version, file_path, digest, product, product_version, limit, output_json):
     """Query using local SQLite storage."""
     from .storage import Storage
 
@@ -443,7 +444,8 @@ def _query_local(name, file_path, digest, product, product_version, limit, outpu
 
     elif name:
         results = storage.search_packages(
-            name_pattern=name, product_name=product, product_version=product_version, limit=limit
+            name_pattern=name, pkg_version=pkg_version,
+            product_name=product, product_version=product_version, limit=limit
         )
         if output_json:
             click.echo(json.dumps(results, indent=2))
@@ -470,7 +472,7 @@ def _query_local(name, file_path, digest, product, product_version, limit, outpu
         console.print("[yellow]Please specify --name, --file, or --digest[/yellow]")
 
 
-def _query_server(ctx, name, file_path, digest, product, product_version, limit, output_json):
+def _query_server(ctx, name, pkg_version, file_path, digest, product, product_version, limit, output_json):
     """Query using API server."""
     from .client import SyfterClient, APIError
     import httpx
@@ -510,7 +512,8 @@ def _query_server(ctx, name, file_path, digest, product, product_version, limit,
 
             elif name:
                 results = client.search_packages(
-                    name=name, product_name=product, product_version=product_version, limit=limit
+                    name=name, pkg_version=pkg_version,
+                    product_name=product, product_version=product_version, limit=limit
                 )
                 if output_json:
                     click.echo(json.dumps(results, indent=2))

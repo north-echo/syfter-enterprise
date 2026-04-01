@@ -470,6 +470,7 @@ class Storage:
     def search_packages(
         self,
         name_pattern: Optional[str] = None,
+        pkg_version: Optional[str] = None,
         product_name: Optional[str] = None,
         product_version: Optional[str] = None,
         limit: int = 100,
@@ -479,6 +480,7 @@ class Storage:
 
         Args:
             name_pattern: SQL LIKE pattern for package name (use % as wildcard)
+            pkg_version: SQL LIKE pattern for package version (use % as wildcard)
             product_name: Filter by product name
             product_version: Filter by product version
             limit: Maximum results to return
@@ -500,6 +502,10 @@ class Storage:
             if name_pattern:
                 query += " AND pkg.name LIKE ?"
                 params.append(name_pattern)
+
+            if pkg_version:
+                query += " AND pkg.version LIKE ?"
+                params.append(pkg_version)
 
             if product_name:
                 query += " AND p.name = ?"
