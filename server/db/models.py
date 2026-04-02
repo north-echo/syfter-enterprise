@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Integer,
     String,
@@ -212,59 +213,23 @@ class File(Base):
     )
 
 
-class Job(Base):
-    """Job model - tracks async import jobs."""
+class ApiKey(Base):
+    """API key for authentication."""
 
-    __tablename__ = "jobs"
+    __tablename__ = "api_keys"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)  # UUID
-    product_id: Mapped[Optional[int]] = mapped_column(ForeignKey("products.id"), nullable=True)
-    system_id: Mapped[Optional[int]] = mapped_column(ForeignKey("systems.id"), nullable=True)
-    scan_id: Mapped[Optional[int]] = mapped_column(ForeignKey("scans.id"), nullable=True)
-
-    # Job type: "product_import" or "system_import"
-    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, processing, complete, failed
-    job_type: Mapped[str] = mapped_column(String(50), default="product_import")
-
-    # S3 keys for uploaded files
-    original_sbom_key: Mapped[Optional[str]] = mapped_column(String(500))
-    modified_sbom_key: Mapped[Optional[str]] = mapped_column(String(500))
-    packages_tsv_key: Mapped[Optional[str]] = mapped_column(String(500))
-    files_tsv_key: Mapped[Optional[str]] = mapped_column(String(500))
-
-    # Metadata - for products
-    product_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    product_version: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-
-    # Metadata - for systems
-    system_hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    system_ip: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
-    system_tag: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    scan_label: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-
-    # Common metadata
-    source_path: Mapped[str] = mapped_column(Text, nullable=False)
-    source_type: Mapped[str] = mapped_column(String(50), default="directory")
-    syft_version: Mapped[Optional[str]] = mapped_column(String(50))
-    image_layers_json: Mapped[Optional[str]] = mapped_column(Text)  # Container layer chain
-
-    # Progress tracking
-    total_packages: Mapped[int] = mapped_column(Integer, default=0)
-    total_files: Mapped[int] = mapped_column(Integer, default=0)
-    processed_packages: Mapped[int] = mapped_column(Integer, default=0)
-    processed_files: Mapped[int] = mapped_column(Integer, default=0)
-
-    # Error tracking
-    error_message: Mapped[Optional[str]] = mapped_column(Text)
-
-    # Timestamps
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)  # SHA-256 hex
+    key_prefix: Mapped[str] = mapped_column(String(8), nullable=False)  # First 8 chars for identification
+    team_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     __table_args__ = (
-        Index("idx_job_status", "status"),
-        Index("idx_job_product", "product_id"),
-        Index("idx_job_system", "system_id"),
-        Index("idx_job_created", "created_at"),
+        Index("idx_apikey_hash", "key_hash"),
+        Index("idx_apikey_team", "team_name"),
     )

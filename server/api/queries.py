@@ -177,6 +177,8 @@ def get_stats(db: Session = Depends(get_db)):
 def list_all_packages(
     product_name: str,
     product_version: str,
+    limit: int = Query(default=10000, le=100000, description="Maximum results"),
+    offset: int = Query(default=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """
@@ -193,6 +195,8 @@ def list_all_packages(
         .join(Product, Package.product_id == Product.id)
         .filter(Product.name == product_name, Product.version == product_version)
         .order_by(Package.name)
+        .offset(offset)
+        .limit(limit)
     )
 
     return [
@@ -212,6 +216,8 @@ def list_all_packages(
 def list_all_files(
     product_name: str,
     product_version: str,
+    limit: int = Query(default=10000, le=100000, description="Maximum results"),
+    offset: int = Query(default=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """
@@ -224,6 +230,8 @@ def list_all_files(
         .join(Product, File.product_id == Product.id)
         .filter(Product.name == product_name, Product.version == product_version)
         .order_by(File.path)
+        .offset(offset)
+        .limit(limit)
     )
 
     return [path for (path,) in query.all()]
@@ -324,6 +332,8 @@ def search_system_files(
 @router.get("/systems/list/packages/{hostname}")
 def list_system_packages(
     hostname: str,
+    limit: int = Query(default=10000, le=100000, description="Maximum results"),
+    offset: int = Query(default=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """
@@ -336,6 +346,8 @@ def list_system_packages(
         .join(System, Package.system_id == System.id)
         .filter(System.hostname == hostname)
         .order_by(Package.name)
+        .offset(offset)
+        .limit(limit)
     )
 
     return [
@@ -352,6 +364,8 @@ def list_system_packages(
 @router.get("/systems/list/files/{hostname}")
 def list_system_files(
     hostname: str,
+    limit: int = Query(default=10000, le=100000, description="Maximum results"),
+    offset: int = Query(default=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
     """
@@ -364,6 +378,8 @@ def list_system_files(
         .join(System, File.system_id == System.id)
         .filter(System.hostname == hostname)
         .order_by(File.path)
+        .offset(offset)
+        .limit(limit)
     )
 
     return [path for (path,) in query.all()]

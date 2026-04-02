@@ -1,5 +1,5 @@
 """
-Main FastAPI application.
+Main FastAPI application — Syfter Enterprise.
 """
 
 import logging
@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api import api_router
+from .auth import auth_middleware, router as admin_router, seed_admin_key
 from .config import get_config, ServerConfig
 from .db import init_db
 
@@ -23,11 +24,11 @@ logger = logging.getLogger(__name__)
 # Large SBOM uploads can be 500MB+ compressed
 MAX_UPLOAD_SIZE = 1024 * 1024 * 1024  # 1GB
 
-__version__ = "0.9.0.1"
+__version__ = "1.0.0"
 
 app = FastAPI(
-    title="Syfter API",
-    description="SBOM generation and management API",
+    title="Syfter Enterprise API",
+    description="Enterprise SBOM platform for RPM and container image scanning at scale",
     version=__version__,
 )
 
@@ -39,6 +40,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def auth_middleware_handler(request: Request, call_next):
+    """API key authentication."""
+    return await auth_middleware(request, call_next)
 
 
 @app.middleware("http")
@@ -63,12 +70,22 @@ async def log_requests(request: Request, call_next):
 
 # Include API router
 app.include_router(api_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize database on startup."""
+    """Initialize database and seed admin key on startup."""
     init_db()
+
+    # Seed admin API key
+    from .db.session import get_session_factory
+    db = get_session_factory()()
+    try:
+        config = get_config()
+        seed_admin_key(db, config.admin_api_key)
+    finally:
+        db.close()
 
 
 @app.get("/")
@@ -76,7 +93,7 @@ def root():
     """Root endpoint with API info."""
     config = get_config()
     return {
-        "name": "Syfter API",
+        "name": "Syfter Enterprise API",
         "version": __version__,
         "database": config.database.type,
         "storage": config.storage.type,

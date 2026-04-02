@@ -2,40 +2,73 @@
 Product API endpoints.
 """
 
-from typing import List
+import json
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from ..db import get_db, Product, Scan, Package, File, ImageLayer, Job
+from ..db import get_db, Product, Scan, Package, File, ImageLayer
 from .schemas import ProductCreate, ProductResponse
 
 router = APIRouter()
 
 
 @router.get("/", response_model=List[ProductResponse])
-def list_products(db: Session = Depends(get_db)):
+def list_products(
+    limit: int = Query(default=100, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, description="Offset for pagination"),
+    db: Session = Depends(get_db),
+):
     """List all products with scan, package, and file counts."""
-    # Get all products first
-    products_list = db.query(Product).order_by(Product.name, Product.version).all()
-
-    products = []
-    for product in products_list:
-        scan_count = db.query(func.count(Scan.id)).filter(Scan.product_id == product.id).scalar() or 0
-        total_packages = db.query(func.count(Package.id)).filter(Package.product_id == product.id).scalar() or 0
-        total_files = db.query(func.count(File.id)).filter(File.product_id == product.id).scalar() or 0
-
-        # Get source_type from the most recent scan
-        latest_scan = (
-            db.query(Scan)
-            .filter(Scan.product_id == product.id)
-            .order_by(Scan.scan_timestamp.desc())
-            .first()
+    # Subqueries for counts — avoids N+1 problem
+    scan_counts = (
+        db.query(
+            Scan.product_id,
+            func.count(Scan.id).label("scan_count"),
         )
-        source_type = latest_scan.source_type if latest_scan else None
+        .group_by(Scan.product_id)
+        .subquery()
+    )
 
-        products.append(ProductResponse(
+    pkg_counts = (
+        db.query(
+            Package.product_id,
+            func.count(Package.id).label("total_packages"),
+        )
+        .group_by(Package.product_id)
+        .subquery()
+    )
+
+    file_counts = (
+        db.query(
+            File.product_id,
+            func.count(File.id).label("total_files"),
+        )
+        .group_by(File.product_id)
+        .subquery()
+    )
+
+    query = (
+        db.query(
+            Product,
+            func.coalesce(scan_counts.c.scan_count, 0).label("scan_count"),
+            func.coalesce(pkg_counts.c.total_packages, 0).label("total_packages"),
+            func.coalesce(file_counts.c.total_files, 0).label("total_files"),
+        )
+        .outerjoin(scan_counts, Product.id == scan_counts.c.product_id)
+        .outerjoin(pkg_counts, Product.id == pkg_counts.c.product_id)
+        .outerjoin(file_counts, Product.id == file_counts.c.product_id)
+        .order_by(Product.name, Product.version)
+        .offset(offset)
+        .limit(limit)
+    )
+
+    results = query.all()
+
+    return [
+        ProductResponse(
             id=product.id,
             name=product.name,
             version=product.version,
@@ -48,15 +81,14 @@ def list_products(db: Session = Depends(get_db)):
             scan_count=scan_count,
             total_packages=total_packages,
             total_files=total_files,
-            source_type=source_type,
-        ))
-
-    return products
+        )
+        for product, scan_count, total_packages, total_files in results
+    ]
 
 
 @router.get("/{product_name}/{product_version}", response_model=ProductResponse)
 def get_product(product_name: str, product_version: str, db: Session = Depends(get_db)):
-    """Get a specific product."""
+    """Get a specific product with counts."""
     product = (
         db.query(Product)
         .filter(Product.name == product_name, Product.version == product_version)
@@ -89,7 +121,6 @@ def get_product(product_name: str, product_version: str, db: Session = Depends(g
 @router.post("/", response_model=ProductResponse, status_code=201)
 def create_product(product: ProductCreate, db: Session = Depends(get_db)):
     """Create a new product."""
-    # Check if product already exists
     existing = (
         db.query(Product)
         .filter(Product.name == product.name, Product.version == product.version)
@@ -130,8 +161,6 @@ def create_product(product: ProductCreate, db: Session = Depends(get_db)):
 @router.get("/{product_name}/{product_version}/layers")
 def get_product_layers(product_name: str, product_version: str, db: Session = Depends(get_db)):
     """Get container layer chain for a product (for container scans only)."""
-    import json
-
     product = (
         db.query(Product)
         .filter(Product.name == product_name, Product.version == product_version)
@@ -141,7 +170,6 @@ def get_product_layers(product_name: str, product_version: str, db: Session = De
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    # Get the latest scan with layer info
     scan = (
         db.query(Scan)
         .filter(Scan.product_id == product.id)
@@ -168,8 +196,6 @@ def get_product_layers(product_name: str, product_version: str, db: Session = De
 @router.delete("/{product_name}/{product_version}", status_code=204)
 def delete_product(product_name: str, product_version: str, db: Session = Depends(get_db)):
     """Delete a product and all its scans, packages, and files."""
-    from sqlalchemy import text
-
     product = (
         db.query(Product)
         .filter(Product.name == product_name, Product.version == product_version)
@@ -180,37 +206,15 @@ def delete_product(product_name: str, product_version: str, db: Session = Depend
 
     product_id = product.id
 
-    # Use raw SQL to ensure proper deletion order
-    # Delete in order to respect foreign key constraints:
-    # jobs (by scan_id) -> jobs (by product_id) -> files -> packages -> image_layers -> scans -> product
-    
-    # Delete jobs that reference scans for this product
-    db.execute(text("""
-        DELETE FROM jobs WHERE scan_id IN (
-            SELECT id FROM scans WHERE product_id = :product_id
-        )
-    """), {"product_id": product_id})
-    
-    # Delete jobs that reference the product directly
-    db.execute(text("DELETE FROM jobs WHERE product_id = :product_id"), {"product_id": product_id})
-    
-    # Delete files
+    # Delete in FK-safe order: files -> packages -> image_layers -> scans -> product
     db.execute(text("DELETE FROM files WHERE product_id = :product_id"), {"product_id": product_id})
-    
-    # Delete packages
     db.execute(text("DELETE FROM packages WHERE product_id = :product_id"), {"product_id": product_id})
-    
-    # Delete image layers
     db.execute(text("""
         DELETE FROM image_layers WHERE scan_id IN (
             SELECT id FROM scans WHERE product_id = :product_id
         )
     """), {"product_id": product_id})
-    
-    # Delete scans
     db.execute(text("DELETE FROM scans WHERE product_id = :product_id"), {"product_id": product_id})
-    
-    # Delete product
     db.execute(text("DELETE FROM products WHERE id = :product_id"), {"product_id": product_id})
-    
+
     db.commit()

@@ -218,12 +218,8 @@ async def upload_scan(
         is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
         param = '%s' if is_postgres else '?'
 
-        # Delete in FK order: jobs -> files -> packages -> scan
+        # Delete in FK order: files -> packages -> scan
         # Commit after each to release locks and let PostgreSQL reclaim space
-        logger.info("Deleting jobs...")
-        cursor.execute(f"DELETE FROM jobs WHERE scan_id = {param}", (existing_scan.id,))
-        raw_conn.commit()
-
         logger.info("Deleting files...")
         cursor.execute(f"DELETE FROM files WHERE scan_id = {param}", (existing_scan.id,))
         raw_conn.commit()
@@ -540,7 +536,6 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db)):
     is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
     param = '%s' if is_postgres else '?'
 
-    cursor.execute(f"DELETE FROM jobs WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM files WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM packages WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM scans WHERE id = {param}", (scan_id,))

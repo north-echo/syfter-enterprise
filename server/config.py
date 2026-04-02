@@ -114,6 +114,10 @@ class ServerConfig:
     workers: int = 4
     # Skip file indexing for scans with more than this many files (0 = never skip)
     skip_file_index_threshold: int = 100000
+    # Authentication
+    auth_enabled: bool = True
+    admin_api_key: Optional[str] = None
+    auth_cache_ttl: int = 60
 
     database: DatabaseConfig = field(default_factory=DatabaseConfig.from_env)
     storage: StorageConfig = field(default_factory=StorageConfig.from_env)
@@ -127,6 +131,9 @@ class ServerConfig:
             debug=os.getenv("SYFTER_DEBUG", "false").lower() == "true",
             workers=int(os.getenv("SYFTER_WORKERS", "4")),
             skip_file_index_threshold=int(os.getenv("SYFTER_SKIP_FILE_INDEX_THRESHOLD", "100000")),
+            auth_enabled=os.getenv("SYFTER_AUTH_ENABLED", "true").lower() == "true",
+            admin_api_key=os.getenv("SYFTER_ADMIN_API_KEY"),
+            auth_cache_ttl=int(os.getenv("SYFTER_AUTH_CACHE_TTL", "60")),
             database=DatabaseConfig.from_env(),
             storage=StorageConfig.from_env(),
         )
