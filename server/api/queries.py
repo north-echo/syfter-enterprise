@@ -102,30 +102,40 @@ def search_packages(
     db: Session = Depends(get_db),
 ):
     """Search for packages across all products. Supports layer_type filter for container scans."""
-    query = (
-        db.query(Package, Product.name, Product.version)
-        .join(Product, Package.product_id == Product.id)
-    )
+    # Subquery: find matching package IDs with early LIMIT termination.
+    # For broad patterns like "lib%" (~500K matches), this lets PostgreSQL
+    # use the index to grab just the first N IDs, then JOIN only those.
+    inner = db.query(Package.id)
+
+    if product_name or product_version:
+        inner = inner.join(Product, Package.product_id == Product.id)
+        if product_name:
+            inner = inner.filter(Product.name == product_name)
+        if product_version:
+            inner = inner.filter(Product.version == product_version)
 
     if layer_type:
-        query = query.join(
+        inner = inner.join(
             ImageLayer,
             (Package.layer_id == ImageLayer.layer_id) & (Package.scan_id == ImageLayer.scan_id),
         )
         if layer_type == "base":
-            query = query.filter(ImageLayer.is_base == True)
+            inner = inner.filter(ImageLayer.is_base == True)
         elif layer_type == "app":
-            query = query.filter(ImageLayer.is_base == False)
+            inner = inner.filter(ImageLayer.is_base == False)
 
-    query = _apply_like_filter(query, Package.name, name)
-    query = _apply_like_filter(query, Package.version, pkg_version)
-    if product_name:
-        query = query.filter(Product.name == product_name)
-    if product_version:
-        query = query.filter(Product.version == product_version)
+    inner = _apply_like_filter(inner, Package.name, name)
+    inner = _apply_like_filter(inner, Package.version, pkg_version)
+    inner = inner.order_by(Package.name).offset(offset).limit(limit)
+    pkg_ids = inner.subquery()
 
-    query = query.order_by(Package.name).offset(offset).limit(limit)
-    results = query.all()
+    results = (
+        db.query(Package, Product.name, Product.version)
+        .join(pkg_ids, Package.id == pkg_ids.c.id)
+        .join(Product, Package.product_id == Product.id)
+        .order_by(Package.name)
+        .all()
+    )
 
     return [
         PackageResponse(
@@ -160,22 +170,29 @@ def search_files(
     db: Session = Depends(get_db),
 ):
     """Search for files across all products."""
-    query = (
+    inner = db.query(File.id)
+
+    if product_name or product_version:
+        inner = inner.join(Product, File.product_id == Product.id)
+        if product_name:
+            inner = inner.filter(Product.name == product_name)
+        if product_version:
+            inner = inner.filter(Product.version == product_version)
+
+    inner = _apply_like_filter(inner, File.path, path)
+    if digest:
+        inner = inner.filter(File.digest == digest)
+    inner = inner.order_by(File.path).offset(offset).limit(limit)
+    file_ids = inner.subquery()
+
+    results = (
         db.query(File, Package.name, Package.version, Package.source_image, Product.name, Product.version)
+        .join(file_ids, File.id == file_ids.c.id)
         .join(Package, File.package_id == Package.id)
         .join(Product, File.product_id == Product.id)
+        .order_by(File.path)
+        .all()
     )
-
-    query = _apply_like_filter(query, File.path, path)
-    if digest:
-        query = query.filter(File.digest == digest)
-    if product_name:
-        query = query.filter(Product.name == product_name)
-    if product_version:
-        query = query.filter(Product.version == product_version)
-
-    query = query.order_by(File.path).offset(offset).limit(limit)
-    results = query.all()
 
     return [
         FileResponse(
@@ -321,19 +338,26 @@ def search_system_packages(
     db: Session = Depends(get_db),
 ):
     """Search for packages across all systems."""
-    query = (
+    inner = db.query(Package.id)
+
+    if hostname or tag:
+        inner = inner.join(System, Package.system_id == System.id)
+        if hostname:
+            inner = inner.filter(System.hostname == hostname)
+        if tag:
+            inner = inner.filter(System.tag == tag)
+
+    inner = _apply_like_filter(inner, Package.name, name)
+    inner = inner.order_by(Package.name).offset(offset).limit(limit)
+    pkg_ids = inner.subquery()
+
+    results = (
         db.query(Package, System.hostname, System.tag)
+        .join(pkg_ids, Package.id == pkg_ids.c.id)
         .join(System, Package.system_id == System.id)
+        .order_by(Package.name)
+        .all()
     )
-
-    query = _apply_like_filter(query, Package.name, name)
-    if hostname:
-        query = query.filter(System.hostname == hostname)
-    if tag:
-        query = query.filter(System.tag == tag)
-
-    query = query.order_by(Package.name).offset(offset).limit(limit)
-    results = query.all()
 
     return [
         SystemPackageResponse(
@@ -365,22 +389,29 @@ def search_system_files(
     db: Session = Depends(get_db),
 ):
     """Search for files across all systems."""
-    query = (
+    inner = db.query(File.id)
+
+    if hostname or tag:
+        inner = inner.join(System, File.system_id == System.id)
+        if hostname:
+            inner = inner.filter(System.hostname == hostname)
+        if tag:
+            inner = inner.filter(System.tag == tag)
+
+    inner = _apply_like_filter(inner, File.path, path)
+    if digest:
+        inner = inner.filter(File.digest == digest)
+    inner = inner.order_by(File.path).offset(offset).limit(limit)
+    file_ids = inner.subquery()
+
+    results = (
         db.query(File, Package.name, Package.version, System.hostname, System.tag)
+        .join(file_ids, File.id == file_ids.c.id)
         .join(Package, File.package_id == Package.id)
         .join(System, File.system_id == System.id)
+        .order_by(File.path)
+        .all()
     )
-
-    query = _apply_like_filter(query, File.path, path)
-    if digest:
-        query = query.filter(File.digest == digest)
-    if hostname:
-        query = query.filter(System.hostname == hostname)
-    if tag:
-        query = query.filter(System.tag == tag)
-
-    query = query.order_by(File.path).offset(offset).limit(limit)
-    results = query.all()
 
     return [
         SystemFileResponse(

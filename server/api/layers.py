@@ -243,7 +243,30 @@ def search_packages_by_layer(
     Example: "Which products ship openssl from their base image?"
       GET /api/v1/layers/search/packages?name=openssl%&layer_type=base
     """
-    query = (
+    from .queries import _apply_like_filter
+
+    inner = db.query(Package.id)
+
+    if product_name:
+        inner = inner.join(Product, Package.product_id == Product.id)
+        inner = inner.filter(Product.name == product_name)
+
+    if layer_type:
+        inner = inner.join(
+            ImageLayer,
+            (Package.layer_id == ImageLayer.layer_id) & (Package.scan_id == ImageLayer.scan_id),
+        )
+        if layer_type == "base":
+            inner = inner.filter(ImageLayer.is_base == True)
+        elif layer_type == "app":
+            inner = inner.filter(ImageLayer.is_base == False)
+
+    inner = _apply_like_filter(inner, Package.name, name)
+    inner = _apply_like_filter(inner, Package.version, pkg_version)
+    inner = inner.order_by(Package.name).offset(offset).limit(limit)
+    pkg_ids = inner.subquery()
+
+    results = (
         db.query(
             Package.name,
             Package.version,
@@ -253,26 +276,15 @@ def search_packages_by_layer(
             Product.name.label("product_name"),
             Product.version.label("product_version"),
         )
+        .join(pkg_ids, Package.id == pkg_ids.c.id)
         .join(Product, Package.product_id == Product.id)
         .outerjoin(
             ImageLayer,
             (Package.layer_id == ImageLayer.layer_id) & (Package.scan_id == ImageLayer.scan_id),
         )
+        .order_by(Package.name, Product.name)
+        .all()
     )
-
-    from .queries import _apply_like_filter
-    query = _apply_like_filter(query, Package.name, name)
-    query = _apply_like_filter(query, Package.version, pkg_version)
-    if product_name:
-        query = query.filter(Product.name == product_name)
-
-    if layer_type == "base":
-        query = query.filter(ImageLayer.is_base == True)
-    elif layer_type == "app":
-        query = query.filter(ImageLayer.is_base == False)
-
-    query = query.order_by(Package.name, Product.name).offset(offset).limit(limit)
-    results = query.all()
 
     return [
         {
