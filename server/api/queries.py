@@ -7,7 +7,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from ..db import get_db, Product, System, Package, File
+from ..db import get_db, Product, System, Package, File, ImageLayer
 from .schemas import PackageResponse, FileResponse, StatsResponse
 from ..config import get_config
 
@@ -60,15 +60,26 @@ def search_packages(
     pkg_version: Optional[str] = Query(default=None, description="Package version pattern (use % as wildcard)"),
     product_name: Optional[str] = Query(default=None, description="Filter by product name"),
     product_version: Optional[str] = Query(default=None, description="Filter by product version"),
+    layer_type: Optional[str] = Query(default=None, description="Filter by layer type: 'base' or 'app'"),
     limit: int = Query(default=100, le=1000, description="Maximum results"),
     offset: int = Query(default=0, description="Offset for pagination"),
     db: Session = Depends(get_db),
 ):
-    """Search for packages across all products."""
+    """Search for packages across all products. Supports layer_type filter for container scans."""
     query = (
         db.query(Package, Product.name, Product.version)
         .join(Product, Package.product_id == Product.id)
     )
+
+    if layer_type:
+        query = query.join(
+            ImageLayer,
+            (Package.layer_id == ImageLayer.layer_id) & (Package.scan_id == ImageLayer.scan_id),
+        )
+        if layer_type == "base":
+            query = query.filter(ImageLayer.is_base == True)
+        elif layer_type == "app":
+            query = query.filter(ImageLayer.is_base == False)
 
     if name:
         query = query.filter(Package.name.like(name))

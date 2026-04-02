@@ -133,6 +133,8 @@ class ImageLayer(Base):
     layer_id: Mapped[str] = mapped_column(String(100), nullable=False)  # sha256 digest
     layer_index: Mapped[int] = mapped_column(Integer, nullable=False)  # position (0=bottom)
     source_image: Mapped[Optional[str]] = mapped_column(String(500))  # image reference
+    is_base: Mapped[bool] = mapped_column(Boolean, default=False)  # true if from base image
+    command: Mapped[Optional[str]] = mapped_column(Text)  # Dockerfile instruction (RUN, COPY, etc.)
 
     # Relationships
     scan: Mapped["Scan"] = relationship(back_populates="image_layers")
@@ -140,6 +142,7 @@ class ImageLayer(Base):
     __table_args__ = (
         Index("idx_image_layer_scan", "scan_id"),
         Index("idx_image_layer_id", "layer_id"),
+        Index("idx_image_layer_base", "is_base"),
         UniqueConstraint("scan_id", "layer_id", name="uq_scan_layer"),
     )
 
