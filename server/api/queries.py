@@ -14,6 +14,42 @@ from ..config import get_config
 router = APIRouter()
 
 
+def _apply_like_filter(query, column, pattern: str):
+    """Apply an optimized LIKE filter.
+
+    For simple prefix patterns (e.g., 'lib%'), converts to a range scan
+    on the B-tree index.  This lets PostgreSQL use the same index for
+    the filter AND ORDER BY, enabling early termination at LIMIT rows
+    instead of scanning all matches first.
+
+    For complex patterns (leading %, embedded _) falls back to LIKE.
+    """
+    if not pattern:
+        return query
+
+    # Find the prefix before the first wildcard character
+    first_wild = len(pattern)
+    for i, c in enumerate(pattern):
+        if c in ("%", "_"):
+            first_wild = i
+            break
+
+    prefix = pattern[:first_wild]
+    remainder = pattern[first_wild:]
+
+    # "openssl%" → range scan: name >= 'openssl' AND name < 'openssm'
+    if remainder == "%" and prefix:
+        upper = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+        return query.filter(column >= prefix, column < upper)
+
+    # "openssl" (no wildcard) → exact match
+    if not remainder:
+        return query.filter(column == pattern)
+
+    # "%openssl%", "lib_xml", etc. → LIKE (can't range-optimize)
+    return query.filter(column.like(pattern))
+
+
 # ============================================================================
 # System-based package/file response schemas (inline for now)
 # ============================================================================
@@ -81,10 +117,8 @@ def search_packages(
         elif layer_type == "app":
             query = query.filter(ImageLayer.is_base == False)
 
-    if name:
-        query = query.filter(Package.name.like(name))
-    if pkg_version:
-        query = query.filter(Package.version.like(pkg_version))
+    query = _apply_like_filter(query, Package.name, name)
+    query = _apply_like_filter(query, Package.version, pkg_version)
     if product_name:
         query = query.filter(Product.name == product_name)
     if product_version:
@@ -132,8 +166,7 @@ def search_files(
         .join(Product, File.product_id == Product.id)
     )
 
-    if path:
-        query = query.filter(File.path.like(path))
+    query = _apply_like_filter(query, File.path, path)
     if digest:
         query = query.filter(File.digest == digest)
     if product_name:
@@ -293,8 +326,7 @@ def search_system_packages(
         .join(System, Package.system_id == System.id)
     )
 
-    if name:
-        query = query.filter(Package.name.like(name))
+    query = _apply_like_filter(query, Package.name, name)
     if hostname:
         query = query.filter(System.hostname == hostname)
     if tag:
@@ -339,8 +371,7 @@ def search_system_files(
         .join(System, File.system_id == System.id)
     )
 
-    if path:
-        query = query.filter(File.path.like(path))
+    query = _apply_like_filter(query, File.path, path)
     if digest:
         query = query.filter(File.digest == digest)
     if hostname:

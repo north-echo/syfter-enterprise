@@ -260,10 +260,9 @@ def search_packages_by_layer(
         )
     )
 
-    if name:
-        query = query.filter(Package.name.like(name))
-    if pkg_version:
-        query = query.filter(Package.version.like(pkg_version))
+    from .queries import _apply_like_filter
+    query = _apply_like_filter(query, Package.name, name)
+    query = _apply_like_filter(query, Package.version, pkg_version)
     if product_name:
         query = query.filter(Product.name == product_name)
 
