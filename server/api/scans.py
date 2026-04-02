@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ..config import get_config
 from ..db import get_db, Product, Scan, Package, File as FileModel
 from ..storage import get_storage
+from .queries import invalidate_stats_cache
 from .schemas import (
     ScanResponse,
     ScanMetadata,
@@ -497,6 +498,8 @@ async def upload_scan(
     elapsed = time.time() - start_time
     logger.info(f"Upload complete: {packages_count} packages, {file_count_actual} files indexed in {elapsed:.1f}s")
 
+    invalidate_stats_cache()
+
     return ScanResponse(
         id=scan.id,
         product_id=scan.product_id,
@@ -541,3 +544,5 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db)):
     cursor.execute(f"DELETE FROM scans WHERE id = {param}", (scan_id,))
     raw_conn.commit()
     db.expire_all()
+
+    invalidate_stats_cache()

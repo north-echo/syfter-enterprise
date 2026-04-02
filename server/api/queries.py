@@ -149,12 +149,33 @@ def search_files(
     ]
 
 
+import time as _time
+
+# In-memory stats cache (avoids 5 COUNT(*) queries on every call)
+_stats_cache: dict = {}
+_stats_cache_ttl: int = 300  # 5 minutes
+
+
+def invalidate_stats_cache():
+    """Invalidate the stats cache. Call after scan upload/delete."""
+    _stats_cache.clear()
+
+
 @router.get("/stats", response_model=StatsResponse)
 def get_stats(db: Session = Depends(get_db)):
-    """Get database statistics."""
+    """Get database statistics. Cached for 5 minutes."""
     from ..db import Scan
 
     config = get_config()
+
+    # Check cache
+    cached = _stats_cache.get("stats")
+    if cached and (_time.time() - cached["time"]) < _stats_cache_ttl:
+        return StatsResponse(
+            **cached["data"],
+            storage_type=config.storage.type,
+            database_type=config.database.type,
+        )
 
     product_count = db.query(Product).count()
     system_count = db.query(System).count()
@@ -162,12 +183,17 @@ def get_stats(db: Session = Depends(get_db)):
     package_count = db.query(Package).count()
     file_count = db.query(File).count()
 
+    data = {
+        "products": product_count,
+        "systems": system_count,
+        "scans": scan_count,
+        "packages": package_count,
+        "files": file_count,
+    }
+    _stats_cache["stats"] = {"time": _time.time(), "data": data}
+
     return StatsResponse(
-        products=product_count,
-        systems=system_count,
-        scans=scan_count,
-        packages=package_count,
-        files=file_count,
+        **data,
         storage_type=config.storage.type,
         database_type=config.database.type,
     )
