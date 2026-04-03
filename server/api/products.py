@@ -22,12 +22,22 @@ def list_products(
     db: Session = Depends(get_db),
 ):
     """List all products with scan, package, and file counts."""
-    # Subqueries for counts — avoids N+1 problem
+    # Step 1: Get product IDs for this page (fast, index-only scan)
+    page_ids = (
+        db.query(Product.id)
+        .order_by(Product.name, Product.version)
+        .offset(offset)
+        .limit(limit)
+        .subquery()
+    )
+
+    # Step 2: Count only for products on this page (not all 3,220)
     scan_counts = (
         db.query(
             Scan.product_id,
             func.count(Scan.id).label("scan_count"),
         )
+        .filter(Scan.product_id.in_(db.query(page_ids.c.id)))
         .group_by(Scan.product_id)
         .subquery()
     )
@@ -37,6 +47,7 @@ def list_products(
             Package.product_id,
             func.count(Package.id).label("total_packages"),
         )
+        .filter(Package.product_id.in_(db.query(page_ids.c.id)))
         .group_by(Package.product_id)
         .subquery()
     )
@@ -46,6 +57,7 @@ def list_products(
             File.product_id,
             func.count(File.id).label("total_files"),
         )
+        .filter(File.product_id.in_(db.query(page_ids.c.id)))
         .group_by(File.product_id)
         .subquery()
     )
@@ -57,12 +69,11 @@ def list_products(
             func.coalesce(pkg_counts.c.total_packages, 0).label("total_packages"),
             func.coalesce(file_counts.c.total_files, 0).label("total_files"),
         )
+        .join(page_ids, Product.id == page_ids.c.id)
         .outerjoin(scan_counts, Product.id == scan_counts.c.product_id)
         .outerjoin(pkg_counts, Product.id == pkg_counts.c.product_id)
         .outerjoin(file_counts, Product.id == file_counts.c.product_id)
         .order_by(Product.name, Product.version)
-        .offset(offset)
-        .limit(limit)
     )
 
     results = query.all()
