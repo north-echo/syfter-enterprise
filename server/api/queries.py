@@ -5,6 +5,7 @@ Query API endpoints for searching packages and files.
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import collate
 from sqlalchemy.orm import Session
 
 from ..db import get_db, Product, System, Package, File, ImageLayer
@@ -15,38 +16,17 @@ router = APIRouter()
 
 
 def _apply_like_filter(query, column, pattern: str):
-    """Apply an optimized LIKE filter.
+    """Apply a LIKE filter, with exact-match shortcut for non-wildcard patterns.
 
-    For simple prefix patterns (e.g., 'lib%'), converts to a range scan
-    on the B-tree index.  This lets PostgreSQL use the same index for
-    the filter AND ORDER BY, enabling early termination at LIMIT rows
-    instead of scanning all matches first.
-
-    For complex patterns (leading %, embedded _) falls back to LIKE.
+    Uses LIKE directly so the text_pattern_ops + COLLATE "C" indexes
+    can handle both filtering and ORDER BY with early LIMIT termination.
     """
     if not pattern:
         return query
 
-    # Find the prefix before the first wildcard character
-    first_wild = len(pattern)
-    for i, c in enumerate(pattern):
-        if c in ("%", "_"):
-            first_wild = i
-            break
-
-    prefix = pattern[:first_wild]
-    remainder = pattern[first_wild:]
-
-    # "openssl%" → range scan: name >= 'openssl' AND name < 'openssm'
-    if remainder == "%" and prefix:
-        upper = prefix[:-1] + chr(ord(prefix[-1]) + 1)
-        return query.filter(column >= prefix, column < upper)
-
-    # "openssl" (no wildcard) → exact match
-    if not remainder:
+    if "%" not in pattern and "_" not in pattern:
         return query.filter(column == pattern)
 
-    # "%openssl%", "lib_xml", etc. → LIKE (can't range-optimize)
     return query.filter(column.like(pattern))
 
 
@@ -126,7 +106,7 @@ def search_packages(
 
     inner = _apply_like_filter(inner, Package.name, name)
     inner = _apply_like_filter(inner, Package.version, pkg_version)
-    inner = inner.order_by(Package.name).offset(offset).limit(limit)
+    inner = inner.order_by(collate(Package.name, "C")).offset(offset).limit(limit)
     pkg_ids = inner.subquery()
 
     results = (
@@ -182,7 +162,7 @@ def search_files(
     inner = _apply_like_filter(inner, File.path, path)
     if digest:
         inner = inner.filter(File.digest == digest)
-    inner = inner.order_by(File.path).offset(offset).limit(limit)
+    inner = inner.order_by(collate(File.path, "C")).offset(offset).limit(limit)
     file_ids = inner.subquery()
 
     results = (
@@ -348,7 +328,7 @@ def search_system_packages(
             inner = inner.filter(System.tag == tag)
 
     inner = _apply_like_filter(inner, Package.name, name)
-    inner = inner.order_by(Package.name).offset(offset).limit(limit)
+    inner = inner.order_by(collate(Package.name, "C")).offset(offset).limit(limit)
     pkg_ids = inner.subquery()
 
     results = (
@@ -401,7 +381,7 @@ def search_system_files(
     inner = _apply_like_filter(inner, File.path, path)
     if digest:
         inner = inner.filter(File.digest == digest)
-    inner = inner.order_by(File.path).offset(offset).limit(limit)
+    inner = inner.order_by(collate(File.path, "C")).offset(offset).limit(limit)
     file_ids = inner.subquery()
 
     results = (

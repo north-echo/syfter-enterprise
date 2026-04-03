@@ -12,7 +12,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, distinct
+from sqlalchemy import func, distinct, collate
 from sqlalchemy.orm import Session
 
 from ..db import get_db, Product, Scan, Package, ImageLayer
@@ -263,7 +263,7 @@ def search_packages_by_layer(
 
     inner = _apply_like_filter(inner, Package.name, name)
     inner = _apply_like_filter(inner, Package.version, pkg_version)
-    inner = inner.order_by(Package.name).offset(offset).limit(limit)
+    inner = inner.order_by(collate(Package.name, "C")).offset(offset).limit(limit)
     pkg_ids = inner.subquery()
 
     results = (
