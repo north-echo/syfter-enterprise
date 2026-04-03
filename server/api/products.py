@@ -22,78 +22,46 @@ def list_products(
     db: Session = Depends(get_db),
 ):
     """List all products with scan, package, and file counts."""
-    # Step 1: Get product IDs for this page (fast, index-only scan)
-    page_ids = (
-        db.query(Product.id)
-        .order_by(Product.name, Product.version)
-        .offset(offset)
-        .limit(limit)
-        .subquery()
-    )
-
-    # Step 2: Count only for products on this page (not all 3,220)
-    scan_counts = (
-        db.query(
-            Scan.product_id,
-            func.count(Scan.id).label("scan_count"),
+    # Raw SQL with CTE + LATERAL: PostgreSQL's planner chooses Hash Join
+    # (full 11M-row seq scan) for ORM subqueries. LATERAL forces Nested
+    # Loop with index scan per product (233ms vs 15.8s).
+    sql = text("""
+        WITH page AS (
+            SELECT id FROM products
+            ORDER BY name, version
+            LIMIT :limit OFFSET :offset
         )
-        .filter(Scan.product_id.in_(db.query(page_ids.c.id)))
-        .group_by(Scan.product_id)
-        .subquery()
-    )
+        SELECT p.id, p.name, p.version, p.vendor, p.cpe_vendor,
+               p.cpe_product, p.purl_namespace, p.description, p.created_at,
+               COALESCE(sc.cnt, 0) AS scan_count,
+               COALESCE(pc.cnt, 0) AS total_packages,
+               COALESCE(fc.cnt, 0) AS total_files
+        FROM products p
+        JOIN page ON p.id = page.id
+        LEFT JOIN LATERAL (SELECT count(*) cnt FROM scans WHERE product_id = p.id) sc ON true
+        LEFT JOIN LATERAL (SELECT count(*) cnt FROM packages WHERE product_id = p.id) pc ON true
+        LEFT JOIN LATERAL (SELECT count(*) cnt FROM files WHERE product_id = p.id) fc ON true
+        ORDER BY p.name, p.version
+    """)
 
-    pkg_counts = (
-        db.query(
-            Package.product_id,
-            func.count(Package.id).label("total_packages"),
-        )
-        .filter(Package.product_id.in_(db.query(page_ids.c.id)))
-        .group_by(Package.product_id)
-        .subquery()
-    )
-
-    file_counts = (
-        db.query(
-            File.product_id,
-            func.count(File.id).label("total_files"),
-        )
-        .filter(File.product_id.in_(db.query(page_ids.c.id)))
-        .group_by(File.product_id)
-        .subquery()
-    )
-
-    query = (
-        db.query(
-            Product,
-            func.coalesce(scan_counts.c.scan_count, 0).label("scan_count"),
-            func.coalesce(pkg_counts.c.total_packages, 0).label("total_packages"),
-            func.coalesce(file_counts.c.total_files, 0).label("total_files"),
-        )
-        .join(page_ids, Product.id == page_ids.c.id)
-        .outerjoin(scan_counts, Product.id == scan_counts.c.product_id)
-        .outerjoin(pkg_counts, Product.id == pkg_counts.c.product_id)
-        .outerjoin(file_counts, Product.id == file_counts.c.product_id)
-        .order_by(Product.name, Product.version)
-    )
-
-    results = query.all()
+    results = db.execute(sql, {"limit": limit, "offset": offset}).fetchall()
 
     return [
         ProductResponse(
-            id=product.id,
-            name=product.name,
-            version=product.version,
-            vendor=product.vendor,
-            cpe_vendor=product.cpe_vendor,
-            cpe_product=product.cpe_product,
-            purl_namespace=product.purl_namespace,
-            description=product.description,
-            created_at=product.created_at,
-            scan_count=scan_count,
-            total_packages=total_packages,
-            total_files=total_files,
+            id=row.id,
+            name=row.name,
+            version=row.version,
+            vendor=row.vendor,
+            cpe_vendor=row.cpe_vendor,
+            cpe_product=row.cpe_product,
+            purl_namespace=row.purl_namespace,
+            description=row.description,
+            created_at=row.created_at,
+            scan_count=row.scan_count,
+            total_packages=row.total_packages,
+            total_files=row.total_files,
         )
-        for product, scan_count, total_packages, total_files in results
+        for row in results
     ]
 
 
