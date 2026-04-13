@@ -153,9 +153,21 @@ class SyfterClient:
 
     # Product operations
     def list_products(self) -> list:
-        """List all products."""
-        response = self.client.get(self._url("/products/"))
-        return self._handle_response(response)
+        """List all products (auto-paginates)."""
+        all_products = []
+        limit = 1000
+        offset = 0
+        while True:
+            response = self.client.get(
+                self._url("/products/"),
+                params={"limit": limit, "offset": offset},
+            )
+            page = self._handle_response(response)
+            all_products.extend(page)
+            if len(page) < limit:
+                break
+            offset += limit
+        return all_products
 
     def get_product(self, name: str, version: str) -> dict:
         """Get a specific product."""
