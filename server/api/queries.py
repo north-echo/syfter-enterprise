@@ -57,6 +57,7 @@ class SystemFileResponse(BaseModel):
 @router.get("/packages", response_model=List[PackageResponse])
 def search_packages(
     name: Optional[str] = Query(default=None, description="Package name pattern (use % as wildcard)"),
+    pkg_version: Optional[str] = Query(default=None, description="Package version pattern (use % as wildcard)"),
     product_name: Optional[str] = Query(default=None, description="Filter by product name"),
     product_version: Optional[str] = Query(default=None, description="Filter by product version"),
     limit: int = Query(default=100, le=1000, description="Maximum results"),
@@ -71,6 +72,8 @@ def search_packages(
 
     if name:
         query = query.filter(Package.name.like(name))
+    if pkg_version:
+        query = query.filter(Package.version.like(pkg_version))
     if product_name:
         query = query.filter(Product.name == product_name)
     if product_version:

@@ -586,6 +586,7 @@ class SyfterClient:
     def search_packages(
         self,
         name: Optional[str] = None,
+        pkg_version: Optional[str] = None,
         product_name: Optional[str] = None,
         product_version: Optional[str] = None,
         limit: int = 100,
@@ -594,6 +595,8 @@ class SyfterClient:
         params = {"limit": limit}
         if name:
             params["name"] = name
+        if pkg_version:
+            params["pkg_version"] = pkg_version
         if product_name:
             params["product_name"] = product_name
         if product_version:
