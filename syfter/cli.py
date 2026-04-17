@@ -27,6 +27,7 @@ from .scanner import (
     scan_target,
     scan_localhost,
     scan_remote_host,
+    mirror_and_scan_url,
     get_source_type,
     get_host_info,
     get_remote_host_info,
@@ -193,7 +194,12 @@ def scan(
 
     try:
         exclude_debug = not include_debug
-        if source_type == "directory":
+        if source_type == "url":
+            original_sbom, syft_version = mirror_and_scan_url(
+                target, show_progress=not quiet, name=prod.full_name, version=product_version,
+                exclude_debug=exclude_debug
+            )
+        elif source_type == "directory":
             path = Path(target.replace("dir:", ""))
             original_sbom, syft_version = scan_directory(
                 path, show_progress=not quiet, name=prod.full_name, version=product_version,
