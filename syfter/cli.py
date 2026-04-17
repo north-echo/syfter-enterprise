@@ -144,6 +144,7 @@ def main(ctx, server_url: Optional[str], force_local: bool):
 @click.option("--include-debug", is_flag=True, help="Include debuginfo/debugsource packages (excluded by default)")
 @click.option("--containerfile", type=click.Path(exists=True), help="Path to Containerfile to extract base image chain")
 @click.option("--base-image", multiple=True, help="Base image reference(s) for layer mapping (repeatable)")
+@click.option("--remote", is_flag=True, help="Run scan server-side (server mirrors and scans the URL)")
 @click.pass_context
 def scan(
     ctx,
@@ -164,8 +165,20 @@ def scan(
     include_debug: bool,
     containerfile: Optional[str],
     base_image: tuple,
+    remote: bool,
 ):
     """Scan a target and store the SBOM with product metadata."""
+    # Handle server-side remote scanning
+    if remote:
+        if ctx.obj["local_mode"]:
+            console.print("[red]Error: --remote requires server mode (set SYFTER_SERVER)[/red]")
+            sys.exit(1)
+        if not target.startswith(("http://", "https://")):
+            console.print("[red]Error: --remote requires an HTTP/HTTPS URL as the target[/red]")
+            sys.exit(1)
+        _remote_scan(ctx, target, product, product_version, description, skip_files, not include_debug)
+        return
+
     try:
         check_syft_installed()
     except SyftNotFoundError as e:
@@ -391,6 +404,62 @@ def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, m
         sys.exit(1)
     except APIError as e:
         console.print(f"[red]Upload failed: {e}[/red]")
+        sys.exit(1)
+
+
+def _remote_scan(ctx, url, product_name, product_version, description, skip_files, exclude_debug):
+    """Trigger a server-side remote scan via the API."""
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+
+    console.print(Panel(
+        f"[bold]Remote URL:[/bold] {url}\n"
+        f"[bold]Product:[/bold] {product_name}-{product_version}\n"
+        f"[bold]Mode:[/bold] Server-side (remote)",
+        title="Syfter Remote Scan",
+        box=box.ROUNDED,
+    ))
+
+    try:
+        with SyfterClient(server_url) as client:
+            # POST to /api/v1/jobs/remote
+            response = client.client.post(
+                client._url("/jobs/remote"),
+                json={
+                    "url": url,
+                    "product_name": product_name,
+                    "product_version": product_version,
+                    "description": description,
+                    "skip_files": skip_files,
+                    "exclude_debug": exclude_debug,
+                },
+            )
+
+            if response.status_code >= 400:
+                try:
+                    detail = response.json().get("detail", response.text)
+                except Exception:
+                    detail = response.text
+                console.print(f"[red]Error: {detail}[/red]")
+                sys.exit(1)
+
+            job = response.json()
+            job_id = job["id"]
+            console.print(f"[green]Remote scan job created: {job_id}[/green]")
+            console.print("[dim]The server is mirroring, scanning, and importing. Polling for status...[/dim]")
+
+            # Poll for completion
+            result = client.wait_for_job(job_id, poll_interval=10.0)
+            scan_id = result.get("scan_id", "unknown")
+            console.print(f"[green]✓ Remote scan complete! Scan #{scan_id} (job: {job_id})[/green]")
+
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Remote scan failed: {e}[/red]")
         sys.exit(1)
 
 

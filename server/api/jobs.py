@@ -18,6 +18,7 @@ from server.config import get_config
 from server.api.schemas import (
     JobCreate,
     SystemJobCreate,
+    RemoteScanCreate,
     JobUploadUrls,
     JobResponse,
     JobListResponse,
@@ -192,6 +193,77 @@ async def create_system_job(
         files_tsv_url=storage.get_presigned_upload_url(files_tsv_key),
         expires_in=3600,
     )
+
+
+@router.post("/remote", response_model=JobResponse)
+async def create_remote_scan(
+    scan_data: RemoteScanCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Create a server-side remote scan job.
+
+    The server will mirror RPMs from the given URL, scan them with syft,
+    and import the results. This runs entirely server-side — the client
+    does not need wget or syft installed.
+
+    The URL should point to an RPM repository directory
+    (e.g., https://example.com/content/dist/rhel10/10.1/x86_64/baseos/os/Packages).
+    """
+    import shutil
+
+    # Verify server has required tools
+    if not shutil.which("wget"):
+        raise HTTPException(
+            status_code=501,
+            detail="Server does not have wget installed. Remote scanning is not available."
+        )
+    if not shutil.which("syft"):
+        raise HTTPException(
+            status_code=501,
+            detail="Server does not have syft installed. Remote scanning is not available."
+        )
+
+    # Validate URL
+    if not scan_data.url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="URL must start with http:// or https://"
+        )
+
+    job_id = str(uuid.uuid4())
+
+    # Create job record
+    job = Job(
+        id=job_id,
+        status="pending",
+        job_type="remote_scan",
+        product_name=scan_data.product_name,
+        product_version=scan_data.product_version,
+        source_path=scan_data.url,
+        source_type="url",
+        total_packages=0,
+        total_files=0,
+    )
+
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    # Queue background processing
+    background_tasks.add_task(
+        process_remote_scan,
+        job_id,
+        scan_data.url,
+        scan_data.product_name,
+        scan_data.product_version,
+        scan_data.description,
+        scan_data.skip_files,
+        scan_data.exclude_debug,
+    )
+
+    return _job_to_response(job)
 
 
 @router.post("/{job_id}/start", response_model=JobResponse)
@@ -834,3 +906,177 @@ def _import_tsv_sqlite(db, raw_conn, storage, job, scan, product, system):
     db.commit()
 
     logger.info(f"Import complete: {pkg_count} packages, {file_count} files")
+
+
+def process_remote_scan(
+    job_id: str,
+    url: str,
+    product_name: str,
+    product_version: str,
+    description: str,
+    skip_files: bool,
+    exclude_debug: bool,
+):
+    """
+    Background task to mirror RPMs from a URL, scan with syft, and import.
+
+    This runs the full pipeline server-side:
+    1. Mirror RPMs from URL using wget
+    2. Scan with syft to generate SBOM
+    3. Process SBOM (modify, extract packages)
+    4. Store SBOM and index packages/files
+    5. Clean up temp files
+    """
+    import gzip
+    import json
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from syfter.scanner import scan_directory, check_syft_installed, ScanError
+    from syfter.manipulator import modify_sbom, extract_packages
+    from syfter.models import Product
+    from syfter.client import build_tsv_files
+    from server.db.session import get_session_factory
+
+    SessionLocal = get_session_factory()
+    db = SessionLocal()
+    tmpdir = None
+
+    try:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            logger.error(f"Remote scan job {job_id} not found")
+            return
+
+        job.status = "processing"
+        job.started_at = datetime.utcnow()
+        db.commit()
+
+        # Step 1: Mirror RPMs
+        logger.info(f"Remote scan {job_id}: mirroring RPMs from {url}")
+        tmpdir = tempfile.mkdtemp(prefix="syfter-remote-")
+        mirror_dir = os.path.join(tmpdir, "packages")
+        os.makedirs(mirror_dir)
+
+        mirror_url = url if url.endswith("/") else url + "/"
+
+        wget_cmd = [
+            "wget", "--mirror", "--no-parent", "--no-host-directories",
+            "--cut-dirs=100",
+            "--directory-prefix", mirror_dir,
+            "--no-verbose",
+            "--accept", "*.rpm",
+        ]
+
+        if exclude_debug:
+            wget_cmd.extend(["--reject", "*debuginfo*,*debugsource*"])
+            wget_cmd.extend(["--exclude-directories", "*/debug/*"])
+
+        wget_cmd.append(mirror_url)
+
+        result = subprocess.run(wget_cmd, capture_output=True, text=True)
+        if result.returncode not in (0, 8):
+            raise ScanError(f"wget failed: {result.stderr[:500]}")
+
+        # Count RPMs
+        rpm_files = list(Path(mirror_dir).rglob("*.rpm"))
+        if not rpm_files:
+            raise ScanError(f"No RPM files found at {url}")
+
+        logger.info(f"Remote scan {job_id}: downloaded {len(rpm_files)} RPMs")
+
+        # Step 2: Scan with syft
+        logger.info(f"Remote scan {job_id}: scanning with syft")
+        syft_version = check_syft_installed()
+        prod = Product(
+            name=product_name,
+            version=product_version,
+            description=description,
+        )
+
+        original_sbom, syft_version = scan_directory(
+            Path(mirror_dir),
+            show_progress=False,
+            name=f"{product_name}-{product_version}",
+            version=product_version,
+            exclude_debug=exclude_debug,
+        )
+
+        # Step 3: Process SBOM
+        logger.info(f"Remote scan {job_id}: processing SBOM")
+        modified_sbom = modify_sbom(original_sbom, prod, exclude_debug=exclude_debug)
+        packages = extract_packages(modified_sbom, skip_files=skip_files)
+
+        total_packages = len(packages)
+        total_files = sum(len(p.get("files", [])) for p in packages)
+
+        job.total_packages = total_packages
+        job.total_files = total_files
+        job.syft_version = syft_version
+        db.commit()
+
+        # Step 4: Store SBOM and import via the existing job pipeline
+        logger.info(f"Remote scan {job_id}: storing SBOM and importing {total_packages} packages")
+        storage = get_storage()
+
+        base_key = f"jobs/{job_id}"
+        original_sbom_key = f"{base_key}/original_sbom.json.gz"
+        modified_sbom_key = f"{base_key}/modified_sbom.json.gz"
+        packages_tsv_key = f"{base_key}/packages.tsv.gz"
+        files_tsv_key = f"{base_key}/files.tsv.gz"
+
+        # Compress and upload SBOMs
+        original_gz = gzip.compress(json.dumps(original_sbom).encode('utf-8'))
+        storage.put(original_sbom_key, original_gz)
+        del original_sbom
+        del original_gz
+
+        modified_gz = gzip.compress(json.dumps(modified_sbom).encode('utf-8'))
+        storage.put(modified_sbom_key, modified_gz)
+        del modified_sbom
+        del modified_gz
+
+        # Build and upload TSV files
+        packages_tsv_gz, files_tsv_gz, _, _ = build_tsv_files(packages)
+        storage.put(packages_tsv_key, packages_tsv_gz)
+        del packages
+        del packages_tsv_gz
+
+        if files_tsv_gz:
+            storage.put(files_tsv_key, files_tsv_gz)
+        del files_tsv_gz
+
+        # Update job with storage keys
+        job.original_sbom_key = original_sbom_key
+        job.modified_sbom_key = modified_sbom_key
+        job.packages_tsv_key = packages_tsv_key
+        job.files_tsv_key = files_tsv_key
+        db.commit()
+
+        # Step 5: Clean up mirror before import (free disk space)
+        logger.info(f"Remote scan {job_id}: cleaning up mirror")
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        tmpdir = None
+
+        # Step 6: Import using existing job processor
+        logger.info(f"Remote scan {job_id}: importing into database")
+        process_job(job_id)
+
+    except Exception as e:
+        logger.exception(f"Remote scan job {job_id} failed: {e}")
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job:
+                job.status = "failed"
+                job.error_message = str(e)[:1000]
+                job.completed_at = datetime.utcnow()
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        if tmpdir and os.path.exists(tmpdir):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        db.close()
