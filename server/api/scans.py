@@ -248,16 +248,16 @@ async def upload_scan(
     packages_data = await packages_json.read()
     logger.info(f"Files read: original={len(original_data)/1024/1024:.1f}MB, modified={len(modified_data)/1024/1024:.1f}MB, packages={len(packages_data)/1024:.1f}KB")
 
-    # Validate SBOM files are proper gzip JSON (quick validation, not full parsing)
-    # We validate the compressed data can be decompressed, but don't parse the full SBOM
-    # to avoid memory issues with large SBOMs
+    # Validate SBOM files are proper gzip (check magic bytes, don't decompress)
+    # Decompressing a truncated slice fails with EOFError for large SBOMs,
+    # so we just verify the gzip magic bytes are present.
     logger.info("Validating SBOM files...")
-    try:
-        # Quick validation - try to decompress first few bytes to check format
-        _safe_gzip_decompress(original_data[:1024*10] if len(original_data) > 1024*10 else original_data, max_size=_MAX_DECOMPRESSED_SIZE)
-        _safe_gzip_decompress(modified_data[:1024*10] if len(modified_data) > 1024*10 else modified_data, max_size=_MAX_DECOMPRESSED_SIZE)
-    except (gzip.BadGzipFile, ValueError) as e:
-        raise HTTPException(status_code=400, detail=f"Invalid SBOM file format: {e}")
+    for label, sbom_data in [("original", original_data), ("modified", modified_data)]:
+        if len(sbom_data) < 2 or sbom_data[:2] != b"\x1f\x8b":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid {label} SBOM: not valid gzip data (missing magic bytes)",
+            )
 
     # Parse packages for indexing - use streaming with size limit
     logger.info("Parsing packages JSON...")
