@@ -163,6 +163,7 @@ async def upload_scan(
     original_sbom: UploadFile = File(..., description="Original syft-json SBOM (gzip compressed)"),
     modified_sbom: UploadFile = File(..., description="Modified syft-json SBOM (gzip compressed)"),
     packages_json: UploadFile = File(..., description="Package index JSON (gzip compressed)"),
+    dependencies_json: Optional[UploadFile] = File(None, description="Dependency index JSON (gzip compressed)"),
     db: Session = Depends(get_db),
 ):
     """
@@ -219,8 +220,12 @@ async def upload_scan(
         is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
         param = '%s' if is_postgres else '?'
 
-        # Delete in FK order: files -> packages -> scan
+        # Delete in FK order: dependencies -> files -> packages -> scan
         # Commit after each to release locks and let PostgreSQL reclaim space
+        logger.info("Deleting dependencies...")
+        cursor.execute(f"DELETE FROM dependencies WHERE scan_id = {param}", (existing_scan.id,))
+        raw_conn.commit()
+
         logger.info("Deleting files...")
         cursor.execute(f"DELETE FROM files WHERE scan_id = {param}", (existing_scan.id,))
         raw_conn.commit()
@@ -288,6 +293,21 @@ async def upload_scan(
 
     total_files = sum(len(p.get("files", [])) for p in packages_list)
     logger.info(f"Parsed {len(packages_list)} packages with {total_files} files")
+
+    # Parse optional dependencies data
+    dependencies_list = []
+    if dependencies_json is not None:
+        logger.info("Parsing dependencies JSON...")
+        try:
+            dep_data = await dependencies_json.read()
+            dep_json_bytes = _safe_gzip_decompress(dep_data)
+            del dep_data
+            dependencies_list = json.loads(dep_json_bytes.decode("utf-8"))
+            del dep_json_bytes
+            logger.info(f"Parsed {len(dependencies_list)} dependency records")
+        except Exception as e:
+            logger.warning(f"Failed to parse dependencies JSON, skipping: {e}")
+            dependencies_list = []
 
     # Create scan record first to get ID
     scan = Scan(
@@ -380,22 +400,26 @@ async def upload_scan(
     # Check if we should skip file indexing for large scans
     config = get_config()
     skip_threshold = config.skip_file_index_threshold
+    skip_files = skip_threshold > 0 and total_files > skip_threshold
 
-    if skip_threshold > 0 and total_files > skip_threshold:
+    if skip_files:
         logger.info(f"Skipping file indexing: {total_files} files exceeds threshold of {skip_threshold}")
         logger.info("File search will not be available for this scan, but packages are indexed")
-        file_count_actual = 0
-    else:
-        # Get package IDs
+
+    # Retrieve package IDs (needed for file and/or dependency insertion)
+    need_pkg_ids = (not skip_files and total_files > 0) or dependencies_list
+    packages_by_key = {}
+    if need_pkg_ids:
         logger.info("Retrieving package IDs...")
         cursor = raw_conn.cursor()
         cursor.execute("SELECT id, name, version, arch FROM packages WHERE scan_id = %s" if is_postgres else
                        "SELECT id, name, version, arch FROM packages WHERE scan_id = ?", (scan.id,))
         packages_by_key = {(row[1], row[2], row[3]): row[0] for row in cursor.fetchall()}
 
+    file_count_actual = 0
+    if not skip_files and total_files > 0:
         logger.info(f"Inserting {total_files} files...")
         bulk_start = time.time()
-        file_count_actual = 0
 
         if is_postgres:
             # Stream files directly to a temp file, then COPY - avoids holding all in memory
@@ -430,10 +454,11 @@ async def upload_scan(
             logger.info(f"Temp file written: {file_count_actual} files, {os.path.getsize(tmp_path)/1024/1024:.1f}MB")
 
             # Free packages_list memory before COPY
-            del packages_list
-            import gc
-            gc.collect()
-            logger.info("Memory freed, starting COPY...")
+            if not dependencies_list:
+                del packages_list
+                import gc
+                gc.collect()
+                logger.info("Memory freed, starting COPY...")
 
             # COPY from file
             cursor = raw_conn.cursor()
@@ -492,11 +517,54 @@ async def upload_scan(
 
         logger.info(f"Files inserted in {time.time() - bulk_start:.1f}s")
 
+    # Insert dependencies
+    dep_count = 0
+    if dependencies_list:
+        logger.info(f"Inserting {len(dependencies_list)} dependencies...")
+        dep_start = time.time()
+
+        dep_tuples = []
+        for dep in dependencies_list:
+            pkg_key = (dep.get("package_name", ""), dep.get("package_version"), dep.get("package_arch"))
+            package_id = packages_by_key.get(pkg_key)
+            dep_tuples.append((
+                package_id,
+                scan.id,
+                product.id,
+                dep.get("dependency_name", ""),
+                dep.get("dependency_version"),
+                dep.get("dependency_flags"),
+                dep.get("dependency_type", "requires"),
+            ))
+
+        if is_postgres:
+            from psycopg2.extras import execute_values
+            cursor = raw_conn.cursor()
+            execute_values(
+                cursor,
+                """INSERT INTO dependencies (package_id, scan_id, product_id, dependency_name, dependency_version, dependency_flags, dependency_type)
+                   VALUES %s""",
+                dep_tuples,
+                page_size=1000
+            )
+            raw_conn.commit()
+        else:
+            cursor = raw_conn.cursor()
+            cursor.executemany(
+                """INSERT INTO dependencies (package_id, scan_id, product_id, dependency_name, dependency_version, dependency_flags, dependency_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                dep_tuples
+            )
+            raw_conn.commit()
+
+        dep_count = len(dep_tuples)
+        logger.info(f"Dependencies inserted in {time.time() - dep_start:.1f}s")
+
     # Refresh session to pick up raw SQL changes
     db.expire_all()
 
     elapsed = time.time() - start_time
-    logger.info(f"Upload complete: {packages_count} packages, {file_count_actual} files indexed in {elapsed:.1f}s")
+    logger.info(f"Upload complete: {packages_count} packages, {file_count_actual} files, {dep_count} deps indexed in {elapsed:.1f}s")
 
     invalidate_stats_cache()
 
@@ -539,6 +607,7 @@ def delete_scan(scan_id: int, db: Session = Depends(get_db)):
     is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
     param = '%s' if is_postgres else '?'
 
+    cursor.execute(f"DELETE FROM dependencies WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM files WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM packages WHERE scan_id = {param}", (scan_id,))
     cursor.execute(f"DELETE FROM scans WHERE id = {param}", (scan_id,))

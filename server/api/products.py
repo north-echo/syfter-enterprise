@@ -185,7 +185,9 @@ def delete_product(product_name: str, product_version: str, db: Session = Depend
 
     product_id = product.id
 
-    # Delete in FK-safe order: files -> packages -> image_layers -> scans -> product
+    # Delete in FK-safe order: dependencies -> files -> packages -> image_layers -> scans -> product
+    db.execute(text("DELETE FROM dependencies WHERE product_id = :product_id"), {"product_id": product_id})
+    db.execute(text("DELETE FROM component_relationships WHERE parent_product_id = :product_id OR component_product_id = :product_id"), {"product_id": product_id})
     db.execute(text("DELETE FROM files WHERE product_id = :product_id"), {"product_id": product_id})
     db.execute(text("DELETE FROM packages WHERE product_id = :product_id"), {"product_id": product_id})
     db.execute(text("""

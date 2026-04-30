@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import collate
 from sqlalchemy.orm import Session
 
-from ..db import get_db, Product, System, Package, File, ImageLayer
-from .schemas import PackageResponse, FileResponse, StatsResponse
+from ..db import get_db, Product, System, Package, File, ImageLayer, Dependency, ComponentRelationship
+from .schemas import PackageResponse, FileResponse, StatsResponse, DependencyResponse, ComponentRelationshipResponse
 from ..config import get_config
 
 router = APIRouter()
@@ -223,6 +223,8 @@ def get_stats(db: Session = Depends(get_db)):
     scan_count = db.query(Scan).count()
     package_count = db.query(Package).count()
     file_count = db.query(File).count()
+    dep_count = db.query(Dependency).count()
+    cr_count = db.query(ComponentRelationship).count()
 
     data = {
         "products": product_count,
@@ -230,6 +232,8 @@ def get_stats(db: Session = Depends(get_db)):
         "scans": scan_count,
         "packages": package_count,
         "files": file_count,
+        "dependencies": dep_count,
+        "component_relationships": cr_count,
     }
     _stats_cache["stats"] = {"time": _time.time(), "data": data}
 
@@ -302,6 +306,185 @@ def list_all_files(
     )
 
     return [path for (path,) in query.all()]
+
+
+# ============================================================================
+# Dependency and component queries
+# ============================================================================
+
+@router.get("/dependencies", response_model=List[DependencyResponse])
+def search_dependencies(
+    package_name: Optional[str] = Query(default=None, description="Package name (exact or % wildcard)"),
+    dependency_name: Optional[str] = Query(default=None, description="Dependency name (exact or % wildcard)"),
+    dependency_type: Optional[str] = Query(default=None, description="'requires' or 'provides'"),
+    product_name: Optional[str] = Query(default=None, description="Filter by product name"),
+    product_version: Optional[str] = Query(default=None, description="Filter by product version"),
+    limit: int = Query(default=100, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, description="Offset for pagination"),
+    db: Session = Depends(get_db),
+):
+    """Search dependency records (RPM requires/provides)."""
+    query = (
+        db.query(Dependency, Package.name, Package.version, Package.arch, Product.name, Product.version)
+        .outerjoin(Package, Dependency.package_id == Package.id)
+        .join(Product, Dependency.product_id == Product.id)
+    )
+
+    if package_name:
+        query = _apply_like_filter(query, Package.name, package_name)
+    if dependency_name:
+        query = _apply_like_filter(query, Dependency.dependency_name, dependency_name)
+    if dependency_type:
+        query = query.filter(Dependency.dependency_type == dependency_type)
+    if product_name:
+        query = query.filter(Product.name == product_name)
+    if product_version:
+        query = query.filter(Product.version == product_version)
+
+    results = query.order_by(Dependency.dependency_name).offset(offset).limit(limit).all()
+
+    return [
+        DependencyResponse(
+            id=dep.id,
+            package_id=dep.package_id,
+            package_name=pkg_name,
+            package_version=pkg_version,
+            package_arch=pkg_arch,
+            dependency_name=dep.dependency_name,
+            dependency_version=dep.dependency_version,
+            dependency_flags=dep.dependency_flags,
+            dependency_type=dep.dependency_type,
+            product_name=prod_name,
+            product_version=prod_version,
+        )
+        for dep, pkg_name, pkg_version, pkg_arch, prod_name, prod_version in results
+    ]
+
+
+@router.get("/components", response_model=List[ComponentRelationshipResponse])
+def search_components(
+    product_name: Optional[str] = Query(default=None, description="Parent product name"),
+    component_name: Optional[str] = Query(default=None, description="Component product name"),
+    limit: int = Query(default=100, le=1000, description="Maximum results"),
+    offset: int = Query(default=0, description="Offset for pagination"),
+    db: Session = Depends(get_db),
+):
+    """Search component relationships between products."""
+    from sqlalchemy.orm import aliased
+
+    ParentProduct = aliased(Product)
+    ComponentProduct = aliased(Product)
+
+    query = (
+        db.query(
+            ComponentRelationship,
+            ParentProduct.name, ParentProduct.version,
+            ComponentProduct.name, ComponentProduct.version,
+        )
+        .join(ParentProduct, ComponentRelationship.parent_product_id == ParentProduct.id)
+        .join(ComponentProduct, ComponentRelationship.component_product_id == ComponentProduct.id)
+    )
+
+    if product_name:
+        query = query.filter(ParentProduct.name == product_name)
+    if component_name:
+        query = query.filter(ComponentProduct.name == component_name)
+
+    results = query.offset(offset).limit(limit).all()
+
+    return [
+        ComponentRelationshipResponse(
+            id=cr.id,
+            parent_product_name=p_name,
+            parent_product_version=p_version,
+            component_product_name=c_name,
+            component_product_version=c_version,
+            relationship_type=cr.relationship_type,
+            created_at=cr.created_at,
+        )
+        for cr, p_name, p_version, c_name, c_version in results
+    ]
+
+
+@router.get("/provenance/{product_name}/{product_version}")
+def get_provenance(
+    product_name: str,
+    product_version: str,
+    package_name_filter: Optional[str] = Query(default=None, description="Filter to specific package name"),
+    limit: int = Query(default=100, le=1000, description="Maximum results"),
+    db: Session = Depends(get_db),
+):
+    """Find all products sharing packages with this product, with relationship context."""
+    from sqlalchemy.orm import aliased
+
+    product = (
+        db.query(Product)
+        .filter(Product.name == product_name, Product.version == product_version)
+        .first()
+    )
+    if not product:
+        return {"product": product_name, "version": product_version, "shared_packages": []}
+
+    pkg_query = db.query(Package.name, Package.version).filter(Package.product_id == product.id)
+    if package_name_filter:
+        pkg_query = _apply_like_filter(pkg_query, Package.name, package_name_filter)
+    pkg_query = pkg_query.distinct().limit(limit)
+    local_packages = pkg_query.all()
+
+    shared = []
+    for pkg_name, pkg_version in local_packages:
+        other_products = (
+            db.query(Product.name, Product.version, Package.arch, Package.source_rpm)
+            .join(Package, Package.product_id == Product.id)
+            .filter(Package.name == pkg_name, Package.version == pkg_version)
+            .filter(Product.id != product.id)
+            .distinct()
+            .limit(20)
+            .all()
+        )
+        if other_products:
+            shared.append({
+                "package_name": pkg_name,
+                "package_version": pkg_version,
+                "found_in": [
+                    {"product": p, "version": v, "arch": a, "source_rpm": s}
+                    for p, v, a, s in other_products
+                ],
+            })
+
+    # Enrich with component relationships
+    from sqlalchemy.orm import aliased
+    ParentProduct = aliased(Product)
+    ComponentProduct = aliased(Product)
+
+    relationships = (
+        db.query(
+            ParentProduct.name, ParentProduct.version,
+            ComponentProduct.name, ComponentProduct.version,
+            ComponentRelationship.relationship_type,
+        )
+        .join(ParentProduct, ComponentRelationship.parent_product_id == ParentProduct.id)
+        .join(ComponentProduct, ComponentRelationship.component_product_id == ComponentProduct.id)
+        .filter(
+            (ComponentRelationship.parent_product_id == product.id)
+            | (ComponentRelationship.component_product_id == product.id)
+        )
+        .all()
+    )
+
+    return {
+        "product": product_name,
+        "version": product_version,
+        "shared_packages": shared,
+        "component_relationships": [
+            {
+                "parent": {"name": pn, "version": pv},
+                "component": {"name": cn, "version": cv},
+                "type": rt,
+            }
+            for pn, pv, cn, cv, rt in relationships
+        ],
+    }
 
 
 # ============================================================================

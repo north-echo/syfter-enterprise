@@ -358,15 +358,14 @@ def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, mo
 
 
 def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers=None):
-    """Store scan using API server with async job-based flow."""
+    """Store scan using API server with direct upload."""
     from .client import SyfterClient, APIError
     import httpx
 
     server_url = ctx.obj["server_url"]
     try:
         with SyfterClient(server_url) as client:
-            # Use async job-based upload for memory efficiency
-            result = client.upload_scan_async(
+            result = client.upload_scan(
                 product_name=prod.name,
                 product_version=prod.version,
                 source_path=target,
@@ -375,10 +374,9 @@ def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, m
                 original_sbom=original_sbom,
                 modified_sbom=modified_sbom,
                 packages=packages,
-                image_layers=image_layers,
             )
             scan_id = result.get("scan_id", "unknown")
-            console.print(f"[green]✓ Scan #{scan_id} uploaded to server (job: {result['id']})[/green]")
+            console.print(f"[green]Scan #{scan_id} uploaded to server[/green]")
     except httpx.ConnectError:
         console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
         console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))

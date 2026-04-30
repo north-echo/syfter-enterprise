@@ -240,8 +240,59 @@ class StatsResponse(BaseModel):
     scans: int
     packages: int
     files: int
+    dependencies: int = 0
+    component_relationships: int = 0
     storage_type: str
     database_type: str
+
+
+# Dependency schemas
+class DependencyResponse(BaseModel):
+    """Schema for dependency search response."""
+
+    id: int
+    package_id: Optional[int]
+    package_name: Optional[str] = None
+    package_version: Optional[str] = None
+    package_arch: Optional[str] = None
+    dependency_name: str
+    dependency_version: Optional[str]
+    dependency_flags: Optional[str]
+    dependency_type: str
+    product_name: str
+    product_version: str
+
+    class Config:
+        from_attributes = True
+
+
+# Component relationship schemas
+class ComponentRelationshipCreate(BaseModel):
+    """Schema for creating a component relationship."""
+
+    parent_product_name: str = Field(..., description="Parent/layered product name")
+    parent_product_version: str = Field(..., description="Parent product version")
+    component_product_name: str = Field(..., description="Component product name")
+    component_product_version: str = Field(..., description="Component product version")
+    relationship_type: str = Field(
+        default="layered",
+        description="'layered' (included without modification) or 'maintained' (Red Hat owns maintenance)",
+    )
+
+
+class ComponentRelationshipResponse(BaseModel):
+    """Schema for component relationship response."""
+
+    id: int
+    parent_product_name: str
+    parent_product_version: str
+    component_product_name: str
+    component_product_version: str
+    relationship_type: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 # Update forward references
