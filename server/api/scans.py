@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from ..config import get_config
-from ..db import get_db, Product, Scan, Package, File as FileModel
+from ..db import get_db, Product, Scan, Package, File as FileModel, ImageLayer, Attestation
 from ..storage import get_storage
 from .queries import invalidate_stats_cache
 from .schemas import (
@@ -164,6 +164,8 @@ async def upload_scan(
     modified_sbom: UploadFile = File(..., description="Modified syft-json SBOM (gzip compressed)"),
     packages_json: UploadFile = File(..., description="Package index JSON (gzip compressed)"),
     dependencies_json: Optional[UploadFile] = File(None, description="Dependency index JSON (gzip compressed)"),
+    image_layers_json: Optional[UploadFile] = File(None, description="Container layer chain JSON (gzip compressed)"),
+    attestation_json: Optional[UploadFile] = File(None, description="Cosign attestation data JSON (gzip compressed)"),
     db: Session = Depends(get_db),
 ):
     """
@@ -204,12 +206,17 @@ async def upload_scan(
         logger.info(f"Deleting existing scan {existing_scan.id}")
         delete_start = time.time()
 
-        # Delete old SBOM files from storage
+        # Delete old SBOM and attestation files from storage
         try:
             storage.delete(existing_scan.original_sbom_key)
             storage.delete(existing_scan.modified_sbom_key)
         except Exception:
-            pass  # Ignore storage errors
+            pass
+        for att in db.query(Attestation).filter(Attestation.scan_id == existing_scan.id).all():
+            try:
+                storage.delete(att.attestation_key)
+            except Exception:
+                pass
 
         # Use raw SQL for fast deletion (ORM is extremely slow for millions of rows)
         connection = db.connection()
@@ -220,8 +227,7 @@ async def upload_scan(
         is_postgres = 'psycopg' in type(raw_conn).__module__ or 'postgresql' in str(db.bind.url)
         param = '%s' if is_postgres else '?'
 
-        # Delete in FK order: dependencies -> files -> packages -> scan
-        # Commit after each to release locks and let PostgreSQL reclaim space
+        # Delete in FK order: dependencies -> files -> packages -> layers/attestations -> scan
         logger.info("Deleting dependencies...")
         cursor.execute(f"DELETE FROM dependencies WHERE scan_id = {param}", (existing_scan.id,))
         raw_conn.commit()
@@ -237,6 +243,10 @@ async def upload_scan(
         cursor.execute(f"DELETE FROM packages WHERE scan_id = {param}", (existing_scan.id,))
         raw_conn.commit()
         logger.info(f"Packages deleted in {time.time() - pkg_start:.1f}s")
+
+        cursor.execute(f"DELETE FROM image_layers WHERE scan_id = {param}", (existing_scan.id,))
+        cursor.execute(f"DELETE FROM attestations WHERE scan_id = {param}", (existing_scan.id,))
+        raw_conn.commit()
 
         logger.info("Deleting scan record...")
         cursor.execute(f"DELETE FROM scans WHERE id = {param}", (existing_scan.id,))
@@ -369,28 +379,29 @@ async def upload_scan(
             pkg.get("license"),
             pkg.get("purl"),
             pkg.get("cpes"),
+            pkg.get("layer_id"),
+            pkg.get("layer_index"),
+            pkg.get("source_image"),
         )
         for pkg in packages_list
     ]
 
+    _pkg_cols = "scan_id, product_id, name, version, release, arch, epoch, source_rpm, license, purl, cpes, layer_id, layer_index, source_image"
+
     if is_postgres:
-        # Use PostgreSQL's execute_values for fast bulk insert
         from psycopg2.extras import execute_values
         cursor = raw_conn.cursor()
         execute_values(
             cursor,
-            """INSERT INTO packages (scan_id, product_id, name, version, release, arch, epoch, source_rpm, license, purl, cpes)
-               VALUES %s""",
+            f"INSERT INTO packages ({_pkg_cols}) VALUES %s",
             package_tuples,
             page_size=1000
         )
         raw_conn.commit()
     else:
-        # SQLite - use executemany
         cursor = raw_conn.cursor()
         cursor.executemany(
-            """INSERT INTO packages (scan_id, product_id, name, version, release, arch, epoch, source_rpm, license, purl, cpes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            f"INSERT INTO packages ({_pkg_cols}) VALUES ({','.join('?' * 14)})",
             package_tuples
         )
         raw_conn.commit()
@@ -559,6 +570,85 @@ async def upload_scan(
 
         dep_count = len(dep_tuples)
         logger.info(f"Dependencies inserted in {time.time() - dep_start:.1f}s")
+
+    # Process image layers (container scans)
+    if image_layers_json is not None:
+        try:
+            layers_data = await image_layers_json.read()
+            layers_list = json.loads(_safe_gzip_decompress(layers_data).decode("utf-8"))
+            scan.image_layers_json = json.dumps(layers_list)
+
+            layer_tuples = [
+                (scan.id, layer.get("layer_id", ""), layer.get("layer_index", i), layer.get("source_image"))
+                for i, layer in enumerate(layers_list)
+            ]
+            cursor = raw_conn.cursor()
+            if is_postgres:
+                from psycopg2.extras import execute_values
+                execute_values(
+                    cursor,
+                    "INSERT INTO image_layers (scan_id, layer_id, layer_index, source_image) VALUES %s",
+                    layer_tuples,
+                )
+            else:
+                cursor.executemany(
+                    "INSERT INTO image_layers (scan_id, layer_id, layer_index, source_image) VALUES (?, ?, ?, ?)",
+                    layer_tuples,
+                )
+            raw_conn.commit()
+            logger.info(f"Stored {len(layers_list)} image layers")
+        except Exception as e:
+            logger.warning(f"Failed to process image layers: {e}")
+
+    # Process attestations (container scans)
+    if attestation_json is not None:
+        import base64
+        from datetime import datetime as dt
+        try:
+            att_data = await attestation_json.read()
+            att_list = json.loads(_safe_gzip_decompress(att_data).decode("utf-8"))
+
+            att_key = _generate_storage_key(product_name, product_version, scan.id, "attestation.json.gz")
+            storage.put(att_key, gzip.compress(json.dumps(att_list).encode()))
+
+            for envelope in att_list:
+                predicate_type = None
+                builder_id = None
+                build_type = None
+                build_started = None
+                build_finished = None
+
+                payload_b64 = envelope.get("payload", "")
+                if payload_b64:
+                    try:
+                        statement = json.loads(base64.b64decode(payload_b64))
+                        predicate_type = statement.get("predicateType")
+                        predicate = statement.get("predicate", {})
+                        builder_id = predicate.get("builder", {}).get("id")
+                        build_type = predicate.get("buildType")
+                        meta = predicate.get("metadata", {})
+                        if meta.get("buildStartedOn"):
+                            build_started = dt.fromisoformat(meta["buildStartedOn"].replace("Z", "+00:00"))
+                        if meta.get("buildFinishedOn"):
+                            build_finished = dt.fromisoformat(meta["buildFinishedOn"].replace("Z", "+00:00"))
+                    except Exception:
+                        predicate_type = envelope.get("_layer_annotations", {}).get("predicateType")
+
+                att_record = Attestation(
+                    scan_id=scan.id,
+                    predicate_type=predicate_type,
+                    builder_id=builder_id,
+                    build_type=build_type,
+                    build_started_on=build_started,
+                    build_finished_on=build_finished,
+                    attestation_key=att_key,
+                )
+                db.add(att_record)
+
+            db.commit()
+            logger.info(f"Stored {len(att_list)} attestation records")
+        except Exception as e:
+            logger.warning(f"Failed to process attestations: {e}")
 
     # Refresh session to pick up raw SQL changes
     db.expire_all()

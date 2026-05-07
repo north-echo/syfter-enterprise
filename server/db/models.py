@@ -115,6 +115,7 @@ class Scan(Base):
     packages: Mapped[List["Package"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
     dependencies: Mapped[List["Dependency"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
     image_layers: Mapped[List["ImageLayer"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
+    attestations: Mapped[List["Attestation"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_scan_product", "product_id"),
@@ -145,6 +146,29 @@ class ImageLayer(Base):
         Index("idx_image_layer_id", "layer_id"),
         Index("idx_image_layer_base", "is_base"),
         UniqueConstraint("scan_id", "layer_id", name="uq_scan_layer"),
+    )
+
+
+class Attestation(Base):
+    """Attestation model - cosign attestation metadata for container scans."""
+
+    __tablename__ = "attestations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
+
+    predicate_type: Mapped[Optional[str]] = mapped_column(String(200))
+    builder_id: Mapped[Optional[str]] = mapped_column(String(500))
+    build_type: Mapped[Optional[str]] = mapped_column(String(200))
+    build_started_on: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    build_finished_on: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    attestation_key: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    scan: Mapped["Scan"] = relationship(back_populates="attestations")
+
+    __table_args__ = (
+        Index("idx_attestation_scan", "scan_id"),
+        Index("idx_attestation_predicate", "predicate_type"),
     )
 
 

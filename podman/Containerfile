@@ -15,7 +15,8 @@ COPY README.md .
 # Install Python dependencies
 RUN pip install --no-cache-dir ".[server]"
 
-# Copy application code
+# Copy application code (ARG forces layer invalidation on rebuild)
+ARG CACHE_BUST=0
 COPY syfter/ syfter/
 COPY server/ server/
 
