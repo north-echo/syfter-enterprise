@@ -627,6 +627,19 @@ class SyfterClient:
         response = self.client.get(self._url("/query/files"), params=params)
         return self._handle_response(response)
 
+    def trace_package(
+        self,
+        name: str,
+        pkg_version: Optional[str] = None,
+        limit: int = 200,
+    ) -> dict:
+        """Trace a package across the product stack."""
+        params = {"name": name, "limit": limit}
+        if pkg_version:
+            params["pkg_version"] = pkg_version
+        response = self.client.get(self._url("/query/trace"), params=params)
+        return self._handle_response(response)
+
     def list_all_packages(
         self,
         product_name: str,

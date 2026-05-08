@@ -1,5 +1,5 @@
 """
-Query API endpoints for searching packages and files.
+Query API endpoints for searching packages, files, and dependencies.
 """
 
 from typing import List, Optional
@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import collate
 from sqlalchemy.orm import Session
 
-from ..db import get_db, Product, System, Package, File, ImageLayer, Dependency, ComponentRelationship
+from ..db import get_db, Product, Scan, System, Package, File, ImageLayer, Dependency, ComponentRelationship
 from .schemas import PackageResponse, FileResponse, StatsResponse, DependencyResponse, ComponentRelationshipResponse
 from ..config import get_config
 
@@ -483,6 +483,111 @@ def get_provenance(
                 "type": rt,
             }
             for pn, pv, cn, cv, rt in relationships
+        ],
+    }
+
+
+@router.get("/trace")
+def trace_package(
+    name: str = Query(..., description="Package name (exact match)"),
+    pkg_version: Optional[str] = Query(default=None, description="Version pattern (% wildcard)"),
+    limit: int = Query(default=200, le=1000),
+    db: Session = Depends(get_db),
+):
+    """Trace a package across the full product stack (repos -> base images -> layered containers)."""
+    from sqlalchemy import and_
+
+    pkg_filter = [Package.name == name]
+    if pkg_version:
+        if "%" in pkg_version:
+            pkg_filter.append(Package.version.like(pkg_version))
+        else:
+            pkg_filter.append(Package.version == pkg_version)
+
+    hits = (
+        db.query(
+            Product.name,
+            Product.version,
+            Package.version,
+            Package.arch,
+            Package.source_image,
+            Scan.source_type,
+        )
+        .join(Product, Package.product_id == Product.id)
+        .join(Scan, Scan.product_id == Product.id)
+        .filter(and_(*pkg_filter))
+        .distinct()
+        .limit(limit)
+        .all()
+    )
+
+    rhel_repos = []
+    base_images = []
+    layered_containers = []
+    other = []
+
+    for prod_name, prod_version, pkg_ver, arch, source_image, source_type in hits:
+        entry = {
+            "product_name": prod_name,
+            "product_version": prod_version,
+            "package_version": pkg_ver,
+            "arch": arch,
+        }
+
+        if source_type == "directory":
+            rhel_repos.append(entry)
+        elif source_type == "container":
+            entry["source_image"] = source_image
+            if source_image is None or source_image == "":
+                base_images.append(entry)
+            else:
+                entry["inherited_from"] = source_image
+                layered_containers.append(entry)
+        else:
+            entry["source_type"] = source_type
+            other.append(entry)
+
+    requires = (
+        db.query(
+            Dependency.dependency_name,
+            Dependency.dependency_version,
+            Dependency.dependency_flags,
+        )
+        .join(Package, Dependency.package_id == Package.id)
+        .filter(Package.name == name, Dependency.dependency_type == "requires")
+        .distinct()
+        .limit(100)
+        .all()
+    )
+
+    required_by = (
+        db.query(
+            Package.name,
+            Package.version,
+            Product.name,
+        )
+        .join(Dependency, Dependency.package_id == Package.id)
+        .join(Product, Package.product_id == Product.id)
+        .filter(Dependency.dependency_name == name, Dependency.dependency_type == "requires")
+        .distinct()
+        .limit(100)
+        .all()
+    )
+
+    return {
+        "package_name": name,
+        "version_filter": pkg_version,
+        "rhel_repos": rhel_repos,
+        "base_images": base_images,
+        "layered_containers": layered_containers,
+        "other": other,
+        "requires": [
+            {"dependency_name": dn, "dependency_version": dv, "dependency_flags": df}
+            for dn, dv, df in requires
+        ],
+        "required_by": [
+            {"package_name": pn, "package_version": pv, "product_name": pr}
+            for pn, pv, pr in required_by
         ],
     }
 

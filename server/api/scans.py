@@ -528,17 +528,27 @@ async def upload_scan(
 
         logger.info(f"Files inserted in {time.time() - bulk_start:.1f}s")
 
-    # Insert dependencies
+    # Insert dependencies (batched to avoid OOM on large repos like appstream with 500K+ deps)
     dep_count = 0
     if dependencies_list:
         logger.info(f"Inserting {len(dependencies_list)} dependencies...")
         dep_start = time.time()
+        DEP_BATCH = 50000
+        cursor = raw_conn.cursor()
 
-        dep_tuples = []
+        if is_postgres:
+            from psycopg2.extras import execute_values
+            dep_sql = """INSERT INTO dependencies (package_id, scan_id, product_id, dependency_name, dependency_version, dependency_flags, dependency_type)
+                         VALUES %s"""
+        else:
+            dep_sql = """INSERT INTO dependencies (package_id, scan_id, product_id, dependency_name, dependency_version, dependency_flags, dependency_type)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)"""
+
+        batch = []
         for dep in dependencies_list:
             pkg_key = (dep.get("package_name", ""), dep.get("package_version"), dep.get("package_arch"))
             package_id = packages_by_key.get(pkg_key)
-            dep_tuples.append((
+            batch.append((
                 package_id,
                 scan.id,
                 product.id,
@@ -547,28 +557,24 @@ async def upload_scan(
                 dep.get("dependency_flags"),
                 dep.get("dependency_type", "requires"),
             ))
+            if len(batch) >= DEP_BATCH:
+                if is_postgres:
+                    execute_values(cursor, dep_sql, batch, page_size=1000)
+                else:
+                    cursor.executemany(dep_sql, batch)
+                raw_conn.commit()
+                dep_count += len(batch)
+                batch = []
 
-        if is_postgres:
-            from psycopg2.extras import execute_values
-            cursor = raw_conn.cursor()
-            execute_values(
-                cursor,
-                """INSERT INTO dependencies (package_id, scan_id, product_id, dependency_name, dependency_version, dependency_flags, dependency_type)
-                   VALUES %s""",
-                dep_tuples,
-                page_size=1000
-            )
+        if batch:
+            if is_postgres:
+                execute_values(cursor, dep_sql, batch, page_size=1000)
+            else:
+                cursor.executemany(dep_sql, batch)
             raw_conn.commit()
-        else:
-            cursor = raw_conn.cursor()
-            cursor.executemany(
-                """INSERT INTO dependencies (package_id, scan_id, product_id, dependency_name, dependency_version, dependency_flags, dependency_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                dep_tuples
-            )
-            raw_conn.commit()
+            dep_count += len(batch)
 
-        dep_count = len(dep_tuples)
+        del dependencies_list
         logger.info(f"Dependencies inserted in {time.time() - dep_start:.1f}s")
 
     # Process image layers (container scans)
