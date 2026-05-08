@@ -295,5 +295,16 @@ class ComponentRelationshipResponse(BaseModel):
         from_attributes = True
 
 
+class RemoteScanCreate(BaseModel):
+    """Schema for creating a server-side remote scan job."""
+
+    url: str = Field(..., description="HTTP/HTTPS URL to an RPM repository directory")
+    product_name: str = Field(..., description="Product name (e.g., 'rhel')")
+    product_version: str = Field(..., description="Product version (e.g., '10.1')")
+    description: str = Field(default="", description="Product description")
+    skip_files: bool = Field(default=True, description="Skip file indexing (recommended for large repos)")
+    exclude_debug: bool = Field(default=True, description="Exclude debuginfo/debugsource packages")
+
+
 # Update forward references
 PackageCreate.model_rebuild()
