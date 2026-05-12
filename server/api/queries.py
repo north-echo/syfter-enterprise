@@ -504,6 +504,8 @@ def trace_package(
         else:
             pkg_filter.append(Package.version == pkg_version)
 
+    from sqlalchemy import func
+
     hits = (
         db.query(
             Product.name,
@@ -512,6 +514,7 @@ def trace_package(
             Package.arch,
             Package.source_image,
             Scan.source_type,
+            Scan.id.label("scan_id"),
         )
         .join(Product, Package.product_id == Product.id)
         .join(Scan, Scan.product_id == Product.id)
@@ -521,12 +524,29 @@ def trace_package(
         .all()
     )
 
+    # Pre-fetch which scans have base layers (batch to avoid N+1)
+    scan_ids = {h.scan_id for h in hits if h.source_type == "container"}
+    scans_with_base = set()
+    base_source_images = {}
+    if scan_ids:
+        base_rows = (
+            db.query(ImageLayer.scan_id, ImageLayer.source_image)
+            .filter(ImageLayer.scan_id.in_(scan_ids), ImageLayer.is_base == True)
+            .distinct()
+            .all()
+        )
+        for sid, src in base_rows:
+            scans_with_base.add(sid)
+            if src:
+                base_source_images[sid] = src
+
     rhel_repos = []
     base_images = []
     layered_containers = []
     other = []
 
-    for prod_name, prod_version, pkg_ver, arch, source_image, source_type in hits:
+    for hit in hits:
+        prod_name, prod_version, pkg_ver, arch, source_image, source_type, scan_id = hit
         entry = {
             "product_name": prod_name,
             "product_version": prod_version,
@@ -537,12 +557,14 @@ def trace_package(
         if source_type == "directory":
             rhel_repos.append(entry)
         elif source_type == "container":
-            entry["source_image"] = source_image
-            if source_image is None or source_image == "":
-                base_images.append(entry)
-            else:
-                entry["inherited_from"] = source_image
+            if scan_id in scans_with_base:
+                inherited = base_source_images.get(scan_id, source_image)
+                entry["inherited_from"] = inherited
+                entry["source_image"] = source_image
                 layered_containers.append(entry)
+            else:
+                entry["source_image"] = source_image
+                base_images.append(entry)
         else:
             entry["source_type"] = source_type
             other.append(entry)

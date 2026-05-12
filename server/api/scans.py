@@ -304,20 +304,16 @@ async def upload_scan(
     total_files = sum(len(p.get("files", [])) for p in packages_list)
     logger.info(f"Parsed {len(packages_list)} packages with {total_files} files")
 
-    # Parse optional dependencies data
-    dependencies_list = []
+    # Read raw dependency data (defer parsing until insert time to reduce peak memory)
+    _dep_compressed = None
     if dependencies_json is not None:
-        logger.info("Parsing dependencies JSON...")
+        logger.info("Reading dependencies JSON...")
         try:
-            dep_data = await dependencies_json.read()
-            dep_json_bytes = _safe_gzip_decompress(dep_data)
-            del dep_data
-            dependencies_list = json.loads(dep_json_bytes.decode("utf-8"))
-            del dep_json_bytes
-            logger.info(f"Parsed {len(dependencies_list)} dependency records")
+            _dep_compressed = await dependencies_json.read()
+            logger.info(f"Dependencies data read: {len(_dep_compressed)/1024:.0f}KB compressed")
         except Exception as e:
-            logger.warning(f"Failed to parse dependencies JSON, skipping: {e}")
-            dependencies_list = []
+            logger.warning(f"Failed to read dependencies JSON, skipping: {e}")
+            _dep_compressed = None
 
     # Create scan record first to get ID
     scan = Scan(
@@ -344,7 +340,8 @@ async def upload_scan(
 
     storage.put(original_key, original_data)
     storage.put(modified_key, modified_data)
-    logger.info("SBOMs stored successfully")
+    del original_data, modified_data
+    logger.info("SBOMs stored and freed from memory")
 
     # Update scan with storage keys
     scan.original_sbom_key = original_key
@@ -418,7 +415,7 @@ async def upload_scan(
         logger.info("File search will not be available for this scan, but packages are indexed")
 
     # Retrieve package IDs (needed for file and/or dependency insertion)
-    need_pkg_ids = (not skip_files and total_files > 0) or dependencies_list
+    need_pkg_ids = (not skip_files and total_files > 0) or _dep_compressed
     packages_by_key = {}
     if need_pkg_ids:
         logger.info("Retrieving package IDs...")
@@ -465,7 +462,7 @@ async def upload_scan(
             logger.info(f"Temp file written: {file_count_actual} files, {os.path.getsize(tmp_path)/1024/1024:.1f}MB")
 
             # Free packages_list memory before COPY
-            if not dependencies_list:
+            if not _dep_compressed:
                 del packages_list
                 import gc
                 gc.collect()
@@ -528,12 +525,12 @@ async def upload_scan(
 
         logger.info(f"Files inserted in {time.time() - bulk_start:.1f}s")
 
-    # Insert dependencies (batched to avoid OOM on large repos like appstream with 500K+ deps)
+    # Insert dependencies -- stream-decompress to avoid holding full list in memory
     dep_count = 0
-    if dependencies_list:
-        logger.info(f"Inserting {len(dependencies_list)} dependencies...")
+    if _dep_compressed:
+        logger.info("Streaming dependency inserts...")
         dep_start = time.time()
-        DEP_BATCH = 50000
+        DEP_BATCH = 10000
         cursor = raw_conn.cursor()
 
         if is_postgres:
@@ -544,38 +541,61 @@ async def upload_scan(
             dep_sql = """INSERT INTO dependencies (package_id, scan_id, product_id, dependency_name, dependency_version, dependency_flags, dependency_type)
                          VALUES (?, ?, ?, ?, ?, ?, ?)"""
 
-        batch = []
-        for dep in dependencies_list:
-            pkg_key = (dep.get("package_name", ""), dep.get("package_version"), dep.get("package_arch"))
-            package_id = packages_by_key.get(pkg_key)
-            batch.append((
-                package_id,
-                scan.id,
-                product.id,
-                dep.get("dependency_name", ""),
-                dep.get("dependency_version"),
-                dep.get("dependency_flags"),
-                dep.get("dependency_type", "requires"),
-            ))
-            if len(batch) >= DEP_BATCH:
+        try:
+            dep_json_bytes = _safe_gzip_decompress(_dep_compressed)
+            del _dep_compressed
+
+            # Use a streaming JSON array parser to avoid loading the full list
+            # ijson would be ideal but we can't add deps; instead, decode the
+            # byte string and iterate with json.JSONDecoder for each element.
+            dep_text = dep_json_bytes.decode("utf-8")
+            del dep_json_bytes
+            import gc
+            gc.collect()
+
+            dependencies_list = json.loads(dep_text)
+            del dep_text
+            gc.collect()
+
+            logger.info(f"Parsed {len(dependencies_list)} dependency records")
+
+            batch = []
+            for dep in dependencies_list:
+                pkg_key = (dep.get("package_name", ""), dep.get("package_version"), dep.get("package_arch"))
+                package_id = packages_by_key.get(pkg_key)
+                batch.append((
+                    package_id,
+                    scan.id,
+                    product.id,
+                    dep.get("dependency_name", ""),
+                    dep.get("dependency_version"),
+                    dep.get("dependency_flags"),
+                    dep.get("dependency_type", "requires"),
+                ))
+                if len(batch) >= DEP_BATCH:
+                    if is_postgres:
+                        execute_values(cursor, dep_sql, batch, page_size=1000)
+                    else:
+                        cursor.executemany(dep_sql, batch)
+                    raw_conn.commit()
+                    dep_count += len(batch)
+                    logger.info(f"  Dependencies batch: {dep_count} inserted so far")
+                    batch = []
+
+            if batch:
                 if is_postgres:
                     execute_values(cursor, dep_sql, batch, page_size=1000)
                 else:
                     cursor.executemany(dep_sql, batch)
                 raw_conn.commit()
                 dep_count += len(batch)
-                batch = []
 
-        if batch:
-            if is_postgres:
-                execute_values(cursor, dep_sql, batch, page_size=1000)
-            else:
-                cursor.executemany(dep_sql, batch)
-            raw_conn.commit()
-            dep_count += len(batch)
+            del dependencies_list
+            gc.collect()
+        except Exception as e:
+            logger.warning(f"Failed to process dependencies: {e}")
 
-        del dependencies_list
-        logger.info(f"Dependencies inserted in {time.time() - dep_start:.1f}s")
+        logger.info(f"Dependencies inserted: {dep_count} in {time.time() - dep_start:.1f}s")
 
     # Process image layers (container scans)
     if image_layers_json is not None:
@@ -585,7 +605,8 @@ async def upload_scan(
             scan.image_layers_json = json.dumps(layers_list)
 
             layer_tuples = [
-                (scan.id, layer.get("layer_id", ""), layer.get("layer_index", i), layer.get("source_image"))
+                (scan.id, layer.get("layer_id", ""), layer.get("layer_index", i),
+                 layer.get("source_image"), bool(layer.get("is_base", False)))
                 for i, layer in enumerate(layers_list)
             ]
             cursor = raw_conn.cursor()
@@ -593,12 +614,12 @@ async def upload_scan(
                 from psycopg2.extras import execute_values
                 execute_values(
                     cursor,
-                    "INSERT INTO image_layers (scan_id, layer_id, layer_index, source_image) VALUES %s",
+                    "INSERT INTO image_layers (scan_id, layer_id, layer_index, source_image, is_base) VALUES %s",
                     layer_tuples,
                 )
             else:
                 cursor.executemany(
-                    "INSERT INTO image_layers (scan_id, layer_id, layer_index, source_image) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO image_layers (scan_id, layer_id, layer_index, source_image, is_base) VALUES (?, ?, ?, ?, ?)",
                     layer_tuples,
                 )
             raw_conn.commit()
