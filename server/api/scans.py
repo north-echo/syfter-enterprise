@@ -545,22 +545,32 @@ async def upload_scan(
             dep_json_bytes = _safe_gzip_decompress(_dep_compressed)
             del _dep_compressed
 
-            # Use a streaming JSON array parser to avoid loading the full list
-            # ijson would be ideal but we can't add deps; instead, decode the
-            # byte string and iterate with json.JSONDecoder for each element.
             dep_text = dep_json_bytes.decode("utf-8")
             del dep_json_bytes
             import gc
             gc.collect()
 
-            dependencies_list = json.loads(dep_text)
-            del dep_text
-            gc.collect()
+            # Stream-parse JSON array one object at a time via raw_decode().
+            # Avoids json.loads() which materializes 1M+ dicts (~3GB) at once.
+            decoder = json.JSONDecoder()
+            pos = 0
+            length = len(dep_text)
 
-            logger.info(f"Parsed {len(dependencies_list)} dependency records")
+            while pos < length and dep_text[pos] in ' \t\n\r':
+                pos += 1
+            if pos < length and dep_text[pos] == '[':
+                pos += 1
 
             batch = []
-            for dep in dependencies_list:
+            while pos < length:
+                while pos < length and dep_text[pos] in ' \t\n\r,':
+                    pos += 1
+                if pos >= length or dep_text[pos] == ']':
+                    break
+
+                dep, end_pos = decoder.raw_decode(dep_text, pos)
+                pos = end_pos
+
                 pkg_key = (dep.get("package_name", ""), dep.get("package_version"), dep.get("package_arch"))
                 package_id = packages_by_key.get(pkg_key)
                 batch.append((
@@ -590,7 +600,7 @@ async def upload_scan(
                 raw_conn.commit()
                 dep_count += len(batch)
 
-            del dependencies_list
+            del dep_text
             gc.collect()
         except Exception as e:
             logger.warning(f"Failed to process dependencies: {e}")
