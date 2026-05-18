@@ -331,6 +331,8 @@ def search_dependencies(
     db: Session = Depends(get_db),
 ):
     """Search dependency records (RPM requires/provides)."""
+    from sqlalchemy import select
+
     query = (
         db.query(Dependency, Package.name, Package.version, Package.arch, Product.name, Product.version)
         .outerjoin(Package, Dependency.package_id == Package.id)
@@ -338,7 +340,11 @@ def search_dependencies(
     )
 
     if package_name:
-        query = _apply_like_filter(query, Package.name, package_name)
+        if "%" in package_name or "_" in package_name:
+            pkg_ids = select(Package.id).where(Package.name.like(package_name))
+        else:
+            pkg_ids = select(Package.id).where(Package.name == package_name)
+        query = query.filter(Dependency.package_id.in_(pkg_ids))
     if dependency_name:
         query = _apply_like_filter(query, Dependency.dependency_name, dependency_name)
     if dependency_type:
