@@ -5,7 +5,7 @@ Query API endpoints for searching packages, files, and dependencies.
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import collate
+from sqlalchemy import collate, text
 from sqlalchemy.orm import Session
 
 from ..db import get_db, Product, Scan, System, Package, File, ImageLayer, Dependency, ComponentRelationship
@@ -218,23 +218,30 @@ def get_stats(db: Session = Depends(get_db)):
             database_type=config.database.type,
         )
 
-    product_count = db.query(Product).count()
-    system_count = db.query(System).count()
-    scan_count = db.query(Scan).count()
-    package_count = db.query(Package).count()
-    file_count = db.query(File).count()
-    dep_count = db.query(Dependency).count()
-    cr_count = db.query(ComponentRelationship).count()
+    # Use the stats_cache materialized view (refreshed every 5m by CronJob)
+    # to avoid 7 COUNT(*) queries across tables with 20M+ rows
+    row = db.execute(
+        text("SELECT product_count, system_count, scan_count, package_count, "
+             "file_count, dependency_count, component_relationship_count "
+             "FROM stats_cache LIMIT 1")
+    ).first()
 
-    data = {
-        "products": product_count,
-        "systems": system_count,
-        "scans": scan_count,
-        "packages": package_count,
-        "files": file_count,
-        "dependencies": dep_count,
-        "component_relationships": cr_count,
-    }
+    if row:
+        data = {
+            "products": row.product_count,
+            "systems": row.system_count,
+            "scans": row.scan_count,
+            "packages": row.package_count,
+            "files": row.file_count,
+            "dependencies": row.dependency_count,
+            "component_relationships": row.component_relationship_count,
+        }
+    else:
+        data = {
+            "products": 0, "systems": 0, "scans": 0,
+            "packages": 0, "files": 0, "dependencies": 0,
+            "component_relationships": 0,
+        }
     _stats_cache["stats"] = {"time": _time.time(), "data": data}
 
     return StatsResponse(
