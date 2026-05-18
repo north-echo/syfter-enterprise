@@ -1214,6 +1214,156 @@ def _display_trace(result, local_mode=False):
     console.print(f"[dim]Total: {total} hits across {len(set(h.get('product_name','') + '/' + h.get('product_version','') for h in rhel + base + layered + other))} products[/dim]")
 
 
+@main.command("deps")
+@click.argument("dependency_name", required=False)
+@click.option("--package", "package_name", help="Package name (what depends on / provides)")
+@click.option("--type", "dep_type", type=click.Choice(["requires", "provides"]), help="Dependency type")
+@click.option("-p", "--product", "product_name", help="Filter by product name")
+@click.option("-v", "--version", "product_version", help="Filter by product version")
+@click.option("--limit", type=int, default=100, help="Maximum results")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def deps_cmd(ctx, dependency_name, package_name, dep_type, product_name, product_version, limit, output_json):
+    """Query RPM dependencies (requires/provides).
+
+    Search what packages require or provide a given dependency,
+    or what dependencies a specific package has.
+
+    Examples:
+
+        syfter deps openssl-libs
+
+        syfter deps --package curl --type requires
+
+        syfter deps openssl-libs -p rhel -v 9.6
+
+        syfter deps --json openssl-libs
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Dependency data requires server mode.[/yellow]")
+        console.print("Set SYFTER_SERVER or use --server to connect.")
+        return
+
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            results = client.search_dependencies(
+                package_name=package_name,
+                dependency_name=dependency_name,
+                dependency_type=dep_type,
+                product_name=product_name,
+                product_version=product_version,
+                limit=limit,
+            )
+
+            if output_json:
+                click.echo(json.dumps(results, indent=2))
+                return
+
+            if not results:
+                console.print("[yellow]No dependencies found.[/yellow]")
+                return
+
+            table = Table(box=box.SIMPLE)
+            table.add_column("Package", style="cyan")
+            table.add_column("Version")
+            table.add_column("Type", style="magenta")
+            table.add_column("Dependency", style="green")
+            table.add_column("Dep Version")
+            table.add_column("Product")
+            table.add_column("Prod Version")
+
+            for dep in results:
+                table.add_row(
+                    dep.get("package_name", ""),
+                    dep.get("package_version", ""),
+                    dep.get("dependency_type", ""),
+                    dep.get("dependency_name", ""),
+                    dep.get("dependency_version", ""),
+                    dep.get("product_name", ""),
+                    dep.get("product_version", ""),
+                )
+
+            console.print(table)
+            console.print(f"[dim]{len(results)} results[/dim]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Query failed: {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("relationships")
+@click.option("--limit", type=int, default=100, help="Maximum results")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def relationships_cmd(ctx, limit, output_json):
+    """List component relationships (product-to-product mappings).
+
+    Shows how products compose into larger products (e.g., a container
+    image is a component of an operator, which is a component of a platform).
+
+    Examples:
+
+        syfter relationships
+
+        syfter relationships --json
+
+        syfter relationships --limit 50
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Relationship data requires server mode.[/yellow]")
+        console.print("Set SYFTER_SERVER or use --server to connect.")
+        return
+
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            results = client.list_relationships(limit=limit)
+
+            if output_json:
+                click.echo(json.dumps(results, indent=2))
+                return
+
+            if not results:
+                console.print("[yellow]No relationships found.[/yellow]")
+                return
+
+            table = Table(box=box.SIMPLE)
+            table.add_column("ID", style="dim")
+            table.add_column("Parent Product", style="cyan")
+            table.add_column("Parent Version")
+            table.add_column("Component Product", style="green")
+            table.add_column("Component Version")
+            table.add_column("Type", style="magenta")
+
+            for rel in results:
+                table.add_row(
+                    str(rel.get("id", "")),
+                    rel.get("parent_product_name", ""),
+                    rel.get("parent_product_version", ""),
+                    rel.get("component_product_name", ""),
+                    rel.get("component_product_version", ""),
+                    rel.get("relationship_type", ""),
+                )
+
+            console.print(table)
+            console.print(f"[dim]{len(results)} relationships[/dim]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Query failed: {e}[/red]")
+        sys.exit(1)
+
+
 @main.command("layers", hidden=True)
 @click.option("-p", "--product", required=True, help="Product name")
 @click.option("-v", "--version", "product_version", required=True, help="Product version")

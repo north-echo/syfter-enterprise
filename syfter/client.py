@@ -640,6 +640,37 @@ class SyfterClient:
         response = self.client.get(self._url("/query/trace"), params=params)
         return self._handle_response(response)
 
+    def search_dependencies(
+        self,
+        package_name: Optional[str] = None,
+        dependency_name: Optional[str] = None,
+        dependency_type: Optional[str] = None,
+        product_name: Optional[str] = None,
+        product_version: Optional[str] = None,
+        limit: int = 100,
+    ) -> list:
+        """Search RPM dependencies (requires/provides)."""
+        params = {"limit": limit}
+        if package_name:
+            params["package_name"] = package_name
+        if dependency_name:
+            params["dependency_name"] = dependency_name
+        if dependency_type:
+            params["dependency_type"] = dependency_type
+        if product_name:
+            params["product_name"] = product_name
+        if product_version:
+            params["product_version"] = product_version
+
+        response = self.client.get(self._url("/query/dependencies"), params=params)
+        return self._handle_response(response)
+
+    def list_relationships(self, limit: int = 100) -> list:
+        """List component relationships."""
+        params = {"limit": limit}
+        response = self.client.get(self._url("/relationships/"), params=params)
+        return self._handle_response(response)
+
     def list_all_packages(
         self,
         product_name: str,
