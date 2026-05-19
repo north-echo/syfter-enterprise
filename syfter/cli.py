@@ -92,7 +92,24 @@ def is_server_mode() -> bool:
     return get_server_url() is not None
 
 
-@click.group()
+class AliasedGroup(click.Group):
+    _aliases = {"query": "search", "list": "show"}
+    _removed = {"job", "jobs"}
+
+    def get_command(self, ctx, cmd_name):
+        if cmd_name in self._removed:
+            click.echo(f"Error: '{cmd_name}' has been removed.", err=True)
+            return None
+        if cmd_name in self._aliases:
+            click.echo(
+                f"Warning: '{cmd_name}' is deprecated, use '{self._aliases[cmd_name]}' instead",
+                err=True,
+            )
+            cmd_name = self._aliases[cmd_name]
+        return super().get_command(ctx, cmd_name)
+
+
+@click.group(cls=AliasedGroup)
 @click.version_option(version=__version__)
 @click.option(
     "--server",
@@ -377,15 +394,14 @@ def _store_local(ctx, prod, target, source_type, syft_version, original_sbom, mo
 
 
 def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, modified_sbom, packages, image_layers=None):
-    """Store scan using API server with async job-based flow."""
+    """Store scan using API server with direct upload."""
     from .client import SyfterClient, APIError
     import httpx
 
     server_url = ctx.obj["server_url"]
     try:
         with SyfterClient(server_url) as client:
-            # Use async job-based upload for memory efficiency
-            result = client.upload_scan_async(
+            result = client.upload_scan(
                 product_name=prod.name,
                 product_version=prod.version,
                 source_path=target,
@@ -394,10 +410,9 @@ def _store_server(ctx, prod, target, source_type, syft_version, original_sbom, m
                 original_sbom=original_sbom,
                 modified_sbom=modified_sbom,
                 packages=packages,
-                image_layers=image_layers,
             )
             scan_id = result.get("scan_id", "unknown")
-            console.print(f"[green]✓ Scan #{scan_id} uploaded to server (job: {result['id']})[/green]")
+            console.print(f"[green]Scan #{scan_id} uploaded to server[/green]")
     except httpx.ConnectError:
         console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
         console.print("[dim]Is the server running? Check with: curl {}/health[/dim]".format(server_url))
@@ -424,7 +439,6 @@ def _remote_scan(ctx, url, product_name, product_version, description, skip_file
 
     try:
         with SyfterClient(server_url) as client:
-            # POST to /api/v1/jobs/remote
             response = client.client.post(
                 client._url("/jobs/remote"),
                 json={
@@ -450,10 +464,9 @@ def _remote_scan(ctx, url, product_name, product_version, description, skip_file
             console.print(f"[green]Remote scan job created: {job_id}[/green]")
             console.print("[dim]The server is mirroring, scanning, and importing. Polling for status...[/dim]")
 
-            # Poll for completion
             result = client.wait_for_job(job_id, poll_interval=10.0)
             scan_id = result.get("scan_id", "unknown")
-            console.print(f"[green]✓ Remote scan complete! Scan #{scan_id} (job: {job_id})[/green]")
+            console.print(f"[green]Remote scan complete! Scan #{scan_id} (job: {job_id})[/green]")
 
     except httpx.ConnectError:
         console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
@@ -463,7 +476,7 @@ def _remote_scan(ctx, url, product_name, product_version, description, skip_file
         sys.exit(1)
 
 
-@main.command("query")
+@main.command("search")
 @click.option("-n", "--name", help="Package name pattern (use %% as wildcard)")
 @click.option("--pkg-version", help="Package version pattern (use %% as wildcard)")
 @click.option("-f", "--file", "file_path", help="File path pattern")
@@ -472,9 +485,31 @@ def _remote_scan(ctx, url, product_name, product_version, description, skip_file
 @click.option("-v", "--version", "product_version", help="Filter by product version")
 @click.option("--limit", type=int, default=50, help="Maximum results")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option("--cross-product", is_flag=True, help="Trace package across the full product stack (JSON output)")
 @click.pass_context
-def query(ctx, name, pkg_version, file_path, digest, product, product_version, limit, output_json):
-    """Query packages and files across all products."""
+def query(ctx, name, pkg_version, file_path, digest, product, product_version, limit, output_json, cross_product):
+    """Search packages and files across all products."""
+    if cross_product:
+        if not name:
+            console.print("[red]Error: --cross-product requires --name[/red]")
+            sys.exit(1)
+        if ctx.obj["local_mode"]:
+            console.print("[red]Error: --cross-product requires server mode[/red]")
+            sys.exit(1)
+        from .client import SyfterClient, APIError
+        import httpx
+        try:
+            with SyfterClient(ctx.obj["server_url"]) as client:
+                result = client.trace_package(name=name, pkg_version=pkg_version, limit=limit)
+                click.echo(json.dumps(result, indent=2))
+        except httpx.ConnectError:
+            console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
+            sys.exit(1)
+        except APIError as e:
+            console.print(f"[red]Cross-product search failed: {e}[/red]")
+            sys.exit(1)
+        return
+
     if ctx.obj["local_mode"]:
         _query_local(name, pkg_version, file_path, digest, product, product_version, limit, output_json)
     else:
@@ -901,65 +936,8 @@ def check():
         sys.exit(1)
 
 
-@main.command("jobs")
-@click.option("-s", "--status", type=click.Choice(["pending", "processing", "complete", "failed"]), help="Filter by status")
-@click.option("-p", "--product", help="Filter by product name")
-@click.option("--limit", type=int, default=20, help="Maximum results")
-@click.pass_context
-def list_jobs(ctx, status, product, limit):
-    """List import jobs (server mode only)."""
-    if ctx.obj["local_mode"]:
-        console.print("[yellow]Jobs are only available in server mode[/yellow]")
-        return
 
-    from .client import SyfterClient, APIError
-    import httpx
-
-    try:
-        with SyfterClient(ctx.obj["server_url"]) as client:
-            result = client.list_jobs(status=status, product_name=product, limit=limit)
-            jobs = result.get("jobs", [])
-
-            if not jobs:
-                console.print("[yellow]No jobs found[/yellow]")
-                return
-
-            table = Table(title=f"Import Jobs ({result.get('total', len(jobs))} total)", box=box.SIMPLE)
-            table.add_column("ID", style="dim", max_width=8)
-            table.add_column("Product", style="cyan")
-            table.add_column("Status", style="bold")
-            table.add_column("Packages", justify="right")
-            table.add_column("Files", justify="right")
-            table.add_column("Created", style="dim")
-
-            for job in jobs:
-                status_style = {
-                    "pending": "yellow",
-                    "processing": "blue",
-                    "complete": "green",
-                    "failed": "red",
-                }.get(job["status"], "white")
-
-                created = job.get("created_at", "")[:19].replace("T", " ")
-
-                table.add_row(
-                    job["id"][:8],
-                    f"{job['product_name']}-{job['product_version']}",
-                    f"[{status_style}]{job['status']}[/{status_style}]",
-                    f"{job['processed_packages']}/{job['total_packages']}",
-                    f"{job['processed_files']}/{job['total_files']}",
-                    created,
-                )
-            console.print(table)
-    except httpx.ConnectError:
-        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
-        sys.exit(1)
-    except APIError as e:
-        console.print(f"[red]Failed to list jobs: {e}[/red]")
-        sys.exit(1)
-
-
-@main.command("list")
+@main.command("show")
 @click.option("-p", "--product", required=True, help="Product name")
 @click.option("-v", "--version", "product_version", required=True, help="Product version")
 @click.option("-t", "--type", "list_type",
@@ -977,22 +955,22 @@ def list_contents(ctx, product, product_version, list_type, full, layers):
 
     Examples:
 
-        syfter list -p rhel -v 10.0 -t files > files.txt
+        syfter show -p rhel -v 10.0 -t files > files.txt
 
-        syfter list -p rhel -v 10.0 -t files | grep libssl
+        syfter show -p rhel -v 10.0 -t files | grep libssl
 
-        syfter list -p rhel -v 10.0 -t packages | wc -l
+        syfter show -p rhel -v 10.0 -t packages | wc -l
 
-        syfter list -p rhel -v 10.0 -t packages --full
+        syfter show -p rhel -v 10.0 -t packages --full
 
         # List packages with source layer (format: layer::package)
-        syfter list -p go-toolset -v 1.25 -t packages --layers
+        syfter show -p go-toolset -v 1.25 -t packages --layers
 
         # Find packages from a specific base image
-        syfter list -p go-toolset -v 1.25 -t packages --layers | grep "^ubi9/ubi::"
+        syfter show -p go-toolset -v 1.25 -t packages --layers | grep "^ubi9/ubi::"
 
         # Count packages per layer
-        syfter list -p go-toolset -v 1.25 -t packages --layers | cut -d: -f1 | sort | uniq -c
+        syfter show -p go-toolset -v 1.25 -t packages --layers | cut -d: -f1 | sort | uniq -c
     """
     if layers and list_type == "files":
         console.print("[yellow]Warning: --layers only applies to packages, ignoring[/yellow]")
@@ -1070,7 +1048,323 @@ def _list_server(ctx, product, product_version, list_type, full, layers=False):
         sys.exit(1)
 
 
-@main.command("layers")
+@main.command("trace")
+@click.argument("package_name")
+@click.option("--pkg-version", help="Version pattern (use %% as wildcard)")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option("--limit", type=int, default=200, help="Maximum results per category")
+@click.pass_context
+def trace_cmd(ctx, package_name, pkg_version, output_json, limit):
+    """Trace a package across the product stack.
+
+    Follows a package from RHEL repos through UBI base images to layered
+    containers. Shows dependency relationships (requires server mode).
+
+    Examples:
+
+        syfter trace systemd
+
+        syfter trace systemd --pkg-version "252%%"
+
+        syfter trace openssl-libs --json
+    """
+    if ctx.obj["local_mode"]:
+        _trace_local(package_name, pkg_version, output_json, limit)
+    else:
+        _trace_server(ctx, package_name, pkg_version, output_json, limit)
+
+
+def _trace_local(package_name, pkg_version, output_json, limit):
+    """Trace using local storage (no dependency data)."""
+    from .storage import Storage
+
+    storage = Storage()
+    products = storage.list_products()
+
+    hits = []
+    for p in products:
+        packages = storage.list_all_packages(p["name"], p["version"])
+        for pkg in packages:
+            if pkg["name"] != package_name:
+                continue
+            if pkg_version and "%" in pkg_version:
+                import fnmatch
+                pattern = pkg_version.replace("%", "*")
+                if not fnmatch.fnmatch(pkg.get("version", ""), pattern):
+                    continue
+            elif pkg_version and pkg.get("version") != pkg_version:
+                continue
+            hits.append({
+                "product_name": p["name"],
+                "product_version": p["version"],
+                "package_version": pkg.get("version"),
+                "arch": pkg.get("arch"),
+                "source_image": pkg.get("source_image"),
+            })
+            if len(hits) >= limit:
+                break
+
+    result = {
+        "package_name": package_name,
+        "version_filter": pkg_version,
+        "rhel_repos": [h for h in hits if not h.get("source_image")],
+        "base_images": [],
+        "layered_containers": [h for h in hits if h.get("source_image")],
+        "other": [],
+        "requires": [],
+        "required_by": [],
+    }
+
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        _display_trace(result, local_mode=True)
+
+
+def _trace_server(ctx, package_name, pkg_version, output_json, limit):
+    """Trace using the server API."""
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            result = client.trace_package(
+                name=package_name,
+                pkg_version=pkg_version,
+                limit=limit,
+            )
+
+            if output_json:
+                click.echo(json.dumps(result, indent=2))
+            else:
+                _display_trace(result, local_mode=False)
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Trace failed: {e}[/red]")
+        sys.exit(1)
+
+
+def _display_trace(result, local_mode=False):
+    """Display trace results in human-readable format."""
+    pkg_name = result["package_name"]
+    version_filter = result.get("version_filter")
+    header = f"Tracing: {pkg_name}"
+    if version_filter:
+        header += f"  (version: {version_filter})"
+    console.print(f"\n[bold]{header}[/bold]\n")
+
+    rhel = result.get("rhel_repos", [])
+    if rhel:
+        console.print("[bold cyan]RHEL Repositories[/bold cyan]")
+        for h in rhel:
+            line = f"  {h['product_name']:<30s} {h['product_version']:<15s} {h.get('package_version', ''):<30s} {h.get('arch', '')}"
+            console.print(line)
+        console.print()
+
+    base = result.get("base_images", [])
+    if base:
+        console.print("[bold green]Base Images[/bold green]")
+        for h in base:
+            line = f"  {h['product_name']:<30s} {h['product_version']:<15s} {h.get('package_version', ''):<30s} {h.get('arch', '')}"
+            console.print(line)
+        console.print()
+
+    layered = result.get("layered_containers", [])
+    if layered:
+        console.print("[bold magenta]Layered Containers[/bold magenta]")
+        for h in layered:
+            inherited = h.get("inherited_from") or h.get("source_image") or ""
+            suffix = f"  (from {inherited})" if inherited else ""
+            line = f"  {h['product_name']:<30s} {h['product_version']:<15s} {h.get('package_version', ''):<30s} {h.get('arch', '')}{suffix}"
+            console.print(line)
+        console.print()
+
+    other = result.get("other", [])
+    if other:
+        console.print("[bold yellow]Other[/bold yellow]")
+        for h in other:
+            line = f"  {h['product_name']:<30s} {h['product_version']:<15s} {h.get('package_version', ''):<30s} {h.get('arch', '')}"
+            console.print(line)
+        console.print()
+
+    if not rhel and not base and not layered and not other:
+        console.print(f"[yellow]No products found containing '{pkg_name}'[/yellow]\n")
+        return
+
+    requires = result.get("requires", [])
+    if requires:
+        dep_names = sorted(set(r["dependency_name"] for r in requires))
+        console.print("[bold]Requires[/bold]")
+        console.print(f"  {', '.join(dep_names)}")
+        console.print()
+    elif local_mode:
+        console.print("[dim]Dependency data requires server mode[/dim]\n")
+
+    required_by = result.get("required_by", [])
+    if required_by:
+        pkg_names = sorted(set(r["package_name"] for r in required_by))
+        console.print("[bold]Required By[/bold]")
+        console.print(f"  {', '.join(pkg_names)}")
+        console.print()
+
+    total = len(rhel) + len(base) + len(layered) + len(other)
+    console.print(f"[dim]Total: {total} hits across {len(set(h.get('product_name','') + '/' + h.get('product_version','') for h in rhel + base + layered + other))} products[/dim]")
+
+
+@main.command("deps")
+@click.argument("dependency_name", required=False)
+@click.option("--package", "package_name", help="Package name (what depends on / provides)")
+@click.option("--type", "dep_type", type=click.Choice(["requires", "provides"]), help="Dependency type")
+@click.option("-p", "--product", "product_name", help="Filter by product name")
+@click.option("-v", "--version", "product_version", help="Filter by product version")
+@click.option("--limit", type=int, default=100, help="Maximum results")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def deps_cmd(ctx, dependency_name, package_name, dep_type, product_name, product_version, limit, output_json):
+    """Query RPM dependencies (requires/provides).
+
+    Search what packages require or provide a given dependency,
+    or what dependencies a specific package has.
+
+    Examples:
+
+        syfter deps openssl-libs
+
+        syfter deps --package curl --type requires
+
+        syfter deps openssl-libs -p rhel -v 9.6
+
+        syfter deps --json openssl-libs
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Dependency data requires server mode.[/yellow]")
+        console.print("Set SYFTER_SERVER or use --server to connect.")
+        return
+
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            results = client.search_dependencies(
+                package_name=package_name,
+                dependency_name=dependency_name,
+                dependency_type=dep_type,
+                product_name=product_name,
+                product_version=product_version,
+                limit=limit,
+            )
+
+            if output_json:
+                click.echo(json.dumps(results, indent=2))
+                return
+
+            if not results:
+                console.print("[yellow]No dependencies found.[/yellow]")
+                return
+
+            table = Table(box=box.SIMPLE)
+            table.add_column("Package", style="cyan")
+            table.add_column("Version")
+            table.add_column("Type", style="magenta")
+            table.add_column("Dependency", style="green")
+            table.add_column("Dep Version")
+            table.add_column("Product")
+            table.add_column("Prod Version")
+
+            for dep in results:
+                table.add_row(
+                    dep.get("package_name", ""),
+                    dep.get("package_version", ""),
+                    dep.get("dependency_type", ""),
+                    dep.get("dependency_name", ""),
+                    dep.get("dependency_version", ""),
+                    dep.get("product_name", ""),
+                    dep.get("product_version", ""),
+                )
+
+            console.print(table)
+            console.print(f"[dim]{len(results)} results[/dim]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Query failed: {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("relationships")
+@click.option("--limit", type=int, default=100, help="Maximum results")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def relationships_cmd(ctx, limit, output_json):
+    """List component relationships (product-to-product mappings).
+
+    Shows how products compose into larger products (e.g., a container
+    image is a component of an operator, which is a component of a platform).
+
+    Examples:
+
+        syfter relationships
+
+        syfter relationships --json
+
+        syfter relationships --limit 50
+    """
+    if ctx.obj["local_mode"]:
+        console.print("[yellow]Relationship data requires server mode.[/yellow]")
+        console.print("Set SYFTER_SERVER or use --server to connect.")
+        return
+
+    from .client import SyfterClient, APIError
+    import httpx
+
+    server_url = ctx.obj["server_url"]
+    try:
+        with SyfterClient(server_url) as client:
+            results = client.list_relationships(limit=limit)
+
+            if output_json:
+                click.echo(json.dumps(results, indent=2))
+                return
+
+            if not results:
+                console.print("[yellow]No relationships found.[/yellow]")
+                return
+
+            table = Table(box=box.SIMPLE)
+            table.add_column("ID", style="dim")
+            table.add_column("Parent Product", style="cyan")
+            table.add_column("Parent Version")
+            table.add_column("Component Product", style="green")
+            table.add_column("Component Version")
+            table.add_column("Type", style="magenta")
+
+            for rel in results:
+                table.add_row(
+                    str(rel.get("id", "")),
+                    rel.get("parent_product_name", ""),
+                    rel.get("parent_product_version", ""),
+                    rel.get("component_product_name", ""),
+                    rel.get("component_product_version", ""),
+                    rel.get("relationship_type", ""),
+                )
+
+            console.print(table)
+            console.print(f"[dim]{len(results)} relationships[/dim]")
+    except httpx.ConnectError:
+        console.print(f"[red]Error: Cannot connect to server at {server_url}[/red]")
+        sys.exit(1)
+    except APIError as e:
+        console.print(f"[red]Query failed: {e}[/red]")
+        sys.exit(1)
+
+
+@main.command("layers", hidden=True)
 @click.option("-p", "--product", required=True, help="Product name")
 @click.option("-v", "--version", "product_version", required=True, help="Product version")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
@@ -1084,7 +1378,7 @@ def show_layers(ctx, product, product_version, output_json):
 
     Examples:
 
-        syfter layers -p go-toolset -v 1.25
+        syfter layers -p go-toolset -v 1.25  (deprecated, use 'show')
 
         syfter layers -p go-toolset -v 1.25 --json
     """
@@ -1190,76 +1484,12 @@ def _display_layers(result, output_json):
             console.print(f"[dim]  • {img}[/dim]")
 
 
-@main.command("job")
-@click.argument("job_id")
-@click.option("--wait", is_flag=True, help="Wait for job to complete")
-@click.option("--cancel", is_flag=True, help="Cancel the job")
-@click.pass_context
-def job_detail(ctx, job_id, wait, cancel):
-    """Get details of a specific job or wait for it to complete."""
-    if ctx.obj["local_mode"]:
-        console.print("[yellow]Jobs are only available in server mode[/yellow]")
-        return
-
-    from .client import SyfterClient, APIError
-    import httpx
-
-    try:
-        with SyfterClient(ctx.obj["server_url"]) as client:
-            if cancel:
-                result = client.cancel_job(job_id)
-                console.print(f"[green]Job {job_id} cancelled[/green]")
-                return
-
-            if wait:
-                console.print(f"[dim]Waiting for job {job_id} to complete...[/dim]")
-                job = client.wait_for_job(job_id)
-            else:
-                job = client.get_job(job_id)
-
-            status_style = {
-                "pending": "yellow",
-                "processing": "blue",
-                "complete": "green",
-                "failed": "red",
-            }.get(job["status"], "white")
-
-            info = (
-                f"[bold]Job ID:[/bold] {job['id']}\n"
-                f"[bold]Status:[/bold] [{status_style}]{job['status']}[/{status_style}]\n"
-                f"[bold]Product:[/bold] {job['product_name']}-{job['product_version']}\n"
-                f"[bold]Source:[/bold] {job['source_path']}\n"
-                f"[bold]Packages:[/bold] {job['processed_packages']}/{job['total_packages']}\n"
-                f"[bold]Files:[/bold] {job['processed_files']}/{job['total_files']}\n"
-            )
-
-            if job.get("scan_id"):
-                info += f"[bold]Scan ID:[/bold] {job['scan_id']}\n"
-
-            if job.get("error_message"):
-                info += f"[bold]Error:[/bold] [red]{job['error_message']}[/red]\n"
-
-            if job.get("created_at"):
-                info += f"[bold]Created:[/bold] {job['created_at'][:19].replace('T', ' ')}\n"
-            if job.get("started_at"):
-                info += f"[bold]Started:[/bold] {job['started_at'][:19].replace('T', ' ')}\n"
-            if job.get("completed_at"):
-                info += f"[bold]Completed:[/bold] {job['completed_at'][:19].replace('T', ' ')}\n"
-
-            console.print(Panel(info, title="Job Details", box=box.ROUNDED))
-    except httpx.ConnectError:
-        console.print(f"[red]Error: Cannot connect to server at {ctx.obj['server_url']}[/red]")
-        sys.exit(1)
-    except APIError as e:
-        console.print(f"[red]Job operation failed: {e}[/red]")
-        sys.exit(1)
-
 
 # ============================================================================
 # System commands (infrastructure mode)
 # ============================================================================
 
-@main.command("systems")
+@main.command("systems", hidden=True)
 @click.option("--tag", help="Filter by system tag")
 @click.pass_context
 def list_systems(ctx, tag):
@@ -1313,7 +1543,7 @@ def list_systems(ctx, tag):
     console.print(table)
 
 
-@main.command("system-query")
+@main.command("system-query", hidden=True)
 @click.option("-n", "--name", help="Package name pattern (use %% as wildcard)")
 @click.option("-f", "--file", "file_path", help="File path pattern")
 @click.option("-d", "--digest", help="File digest (exact match)")
@@ -1395,7 +1625,7 @@ def system_query(ctx, name, file_path, digest, hostname, tag, limit, output_json
         sys.exit(1)
 
 
-@main.command("system-list")
+@main.command("system-list", hidden=True)
 @click.option("-H", "--hostname", required=True, help="System hostname")
 @click.option("-t", "--type", "list_type",
               type=click.Choice(["files", "packages"]),
@@ -1441,7 +1671,7 @@ def system_list_contents(ctx, hostname, list_type, full):
         sys.exit(1)
 
 
-@main.command("system-scan")
+@main.command("system-scan", hidden=True)
 @click.argument("target", default="localhost")
 @click.option("-t", "--tag", help="System tag for grouping/filtering (e.g., 'production', 'web-servers')")
 @click.option("-u", "--user", help="SSH user for remote hosts")

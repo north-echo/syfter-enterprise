@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir ".[server]"
 # Copy application code
 COPY syfter/ syfter/
 COPY server/ server/
+RUN echo "build: $(date -u +%Y%m%dT%H%M%SZ)" > /app/.build-timestamp
 
 # Create non-root user
 RUN useradd -m -u 1000 syfter && chown -R syfter:syfter /app
