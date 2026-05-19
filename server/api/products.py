@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from ..db import get_db, Product, Scan, Package, File, ImageLayer
+from ..db import get_db, Product, Scan, Package, File, ImageLayer, Attestation
 from .schemas import ProductCreate, ProductResponse
 
 router = APIRouter()
@@ -172,6 +172,48 @@ def get_product_layers(product_name: str, product_version: str, db: Session = De
     }
 
 
+@router.get("/{product_name}/{product_version}/attestations")
+def get_product_attestations(product_name: str, product_version: str, db: Session = Depends(get_db)):
+    """Get cosign attestation metadata for a product (container scans only)."""
+    product = (
+        db.query(Product)
+        .filter(Product.name == product_name, Product.version == product_version)
+        .first()
+    )
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    scan = (
+        db.query(Scan)
+        .filter(Scan.product_id == product.id)
+        .order_by(Scan.scan_timestamp.desc())
+        .first()
+    )
+    if not scan:
+        raise HTTPException(status_code=404, detail="No scans found for this product")
+
+    atts = db.query(Attestation).filter(Attestation.scan_id == scan.id).all()
+    if not atts:
+        raise HTTPException(status_code=404, detail="No attestation data available")
+
+    return {
+        "product_name": product.name,
+        "product_version": product.version,
+        "source_path": scan.source_path,
+        "attestations": [
+            {
+                "id": a.id,
+                "predicate_type": a.predicate_type,
+                "builder_id": a.builder_id,
+                "build_type": a.build_type,
+                "build_started_on": a.build_started_on.isoformat() if a.build_started_on else None,
+                "build_finished_on": a.build_finished_on.isoformat() if a.build_finished_on else None,
+            }
+            for a in atts
+        ],
+    }
+
+
 @router.delete("/{product_name}/{product_version}", status_code=204)
 def delete_product(product_name: str, product_version: str, db: Session = Depends(get_db)):
     """Delete a product and all its scans, packages, and files."""
@@ -185,11 +227,18 @@ def delete_product(product_name: str, product_version: str, db: Session = Depend
 
     product_id = product.id
 
-    # Delete in FK-safe order: files -> packages -> image_layers -> scans -> product
+    # Delete in FK-safe order: dependencies -> files -> packages -> image_layers -> attestations -> scans -> product
+    db.execute(text("DELETE FROM dependencies WHERE product_id = :product_id"), {"product_id": product_id})
+    db.execute(text("DELETE FROM component_relationships WHERE parent_product_id = :product_id OR component_product_id = :product_id"), {"product_id": product_id})
     db.execute(text("DELETE FROM files WHERE product_id = :product_id"), {"product_id": product_id})
     db.execute(text("DELETE FROM packages WHERE product_id = :product_id"), {"product_id": product_id})
     db.execute(text("""
         DELETE FROM image_layers WHERE scan_id IN (
+            SELECT id FROM scans WHERE product_id = :product_id
+        )
+    """), {"product_id": product_id})
+    db.execute(text("""
+        DELETE FROM attestations WHERE scan_id IN (
             SELECT id FROM scans WHERE product_id = :product_id
         )
     """), {"product_id": product_id})

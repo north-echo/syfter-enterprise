@@ -10,12 +10,17 @@ Enables queries like:
 
 from typing import List, Optional
 
+import logging
+from collections import defaultdict
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, distinct, collate
+from sqlalchemy import func, distinct, collate, update
 from sqlalchemy.orm import Session
 
 from ..db import get_db, Product, Scan, Package, ImageLayer
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -298,3 +303,141 @@ def search_packages_by_layer(
         }
         for pkg_name, pkg_ver, arch, src_img, is_base, prod_name, prod_ver in results
     ]
+
+
+@router.get("/chains")
+def get_layer_chains(
+    db: Session = Depends(get_db),
+):
+    """Return all container layer chains, grouped by product:version."""
+    rows = (
+        db.query(
+            Product.name,
+            Product.version,
+            ImageLayer.layer_id,
+            ImageLayer.layer_index,
+            Scan.source_path,
+        )
+        .join(Scan, ImageLayer.scan_id == Scan.id)
+        .join(Product, Scan.product_id == Product.id)
+        .order_by(Product.name, Product.version, ImageLayer.layer_index)
+        .all()
+    )
+
+    chains = {}
+    for prod_name, prod_version, layer_id, layer_index, source_path in rows:
+        key = f"{prod_name}:{prod_version}"
+        if key not in chains:
+            chains[key] = {"layers": [], "source_path": source_path}
+        chains[key]["layers"].append(layer_id)
+
+    return chains
+
+
+@router.post("/enrich")
+def enrich_layers(
+    db: Session = Depends(get_db),
+):
+    """Batch-enrich container layers using prefix matching to identify base images.
+
+    For each container product, finds the shortest layer chain from another product
+    that is a strict prefix. Marks matching layers as is_base=True and sets
+    source_image to the base product reference.
+    """
+    rows = (
+        db.query(
+            Product.name,
+            Product.version,
+            ImageLayer.layer_id,
+            ImageLayer.layer_index,
+            ImageLayer.scan_id,
+            Scan.source_path,
+        )
+        .join(Scan, ImageLayer.scan_id == Scan.id)
+        .join(Product, Scan.product_id == Product.id)
+        .order_by(Product.name, Product.version, ImageLayer.layer_index)
+        .all()
+    )
+
+    # Build per-product layer chains
+    product_chains = {}  # key -> {layers: [layer_id, ...], scan_id, source_path}
+    for prod_name, prod_version, layer_id, layer_index, scan_id, source_path in rows:
+        key = f"{prod_name}:{prod_version}"
+        if key not in product_chains:
+            product_chains[key] = {
+                "layers": [],
+                "scan_id": scan_id,
+                "source_path": source_path,
+            }
+        product_chains[key]["layers"].append(layer_id)
+
+    # For each product, find the shortest strict prefix match
+    enriched = 0
+    base_images_found = set()
+    skipped = 0
+
+    # Sort candidates by chain length (shortest first) for efficient prefix matching
+    candidates = sorted(product_chains.items(), key=lambda x: len(x[1]["layers"]))
+
+    for key, chain_data in product_chains.items():
+        chain = chain_data["layers"]
+        if len(chain) < 2:
+            skipped += 1
+            continue
+
+        best_base = None
+        best_base_len = 0
+
+        for cand_key, cand_data in candidates:
+            if cand_key == key:
+                continue
+            cand_chain = cand_data["layers"]
+            cand_len = len(cand_chain)
+
+            if cand_len >= len(chain):
+                continue
+            if cand_len <= best_base_len:
+                continue
+
+            # Check if candidate is a prefix
+            if chain[:cand_len] == cand_chain:
+                best_base = cand_key
+                best_base_len = cand_len
+
+        if not best_base:
+            skipped += 1
+            continue
+
+        base_images_found.add(best_base)
+        base_layers = set(chain[:best_base_len])
+        scan_id = chain_data["scan_id"]
+
+        # Update ImageLayer records
+        db.execute(
+            update(ImageLayer)
+            .where(ImageLayer.scan_id == scan_id, ImageLayer.layer_id.in_(base_layers))
+            .values(is_base=True, source_image=best_base)
+        )
+
+        # Update Package records whose layer_id matches a base layer
+        db.execute(
+            update(Package)
+            .where(Package.scan_id == scan_id, Package.layer_id.in_(base_layers))
+            .values(source_image=best_base)
+        )
+
+        enriched += 1
+
+    db.commit()
+
+    logger.info(
+        f"Layer enrichment: {enriched} products enriched, "
+        f"{len(base_images_found)} base images found, {skipped} skipped"
+    )
+
+    return {
+        "enriched_products": enriched,
+        "base_images_found": sorted(base_images_found),
+        "skipped": skipped,
+        "total_products": len(product_chains),
+    }

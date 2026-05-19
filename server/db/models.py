@@ -113,7 +113,9 @@ class Scan(Base):
     product: Mapped[Optional["Product"]] = relationship(back_populates="scans")
     system: Mapped[Optional["System"]] = relationship(back_populates="scans")
     packages: Mapped[List["Package"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
+    dependencies: Mapped[List["Dependency"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
     image_layers: Mapped[List["ImageLayer"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
+    attestations: Mapped[List["Attestation"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("idx_scan_product", "product_id"),
@@ -144,6 +146,29 @@ class ImageLayer(Base):
         Index("idx_image_layer_id", "layer_id"),
         Index("idx_image_layer_base", "is_base"),
         UniqueConstraint("scan_id", "layer_id", name="uq_scan_layer"),
+    )
+
+
+class Attestation(Base):
+    """Attestation model - cosign attestation metadata for container scans."""
+
+    __tablename__ = "attestations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), nullable=False)
+
+    predicate_type: Mapped[Optional[str]] = mapped_column(String(200))
+    builder_id: Mapped[Optional[str]] = mapped_column(String(500))
+    build_type: Mapped[Optional[str]] = mapped_column(String(200))
+    build_started_on: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    build_finished_on: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    attestation_key: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    scan: Mapped["Scan"] = relationship(back_populates="attestations")
+
+    __table_args__ = (
+        Index("idx_attestation_scan", "scan_id"),
+        Index("idx_attestation_predicate", "predicate_type"),
     )
 
 
@@ -213,6 +238,71 @@ class File(Base):
         Index("idx_file_system", "system_id"),
         Index("idx_file_digest", "digest"),
         Index("idx_file_scan", "scan_id"),
+    )
+
+
+class Dependency(Base):
+    """Dependency model - RPM requires/provides for a package."""
+
+    __tablename__ = "dependencies"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    package_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("packages.id", ondelete="CASCADE"), nullable=True
+    )
+    scan_id: Mapped[int] = mapped_column(
+        ForeignKey("scans.id", ondelete="CASCADE"), nullable=False
+    )
+    product_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("products.id"), nullable=True
+    )
+
+    dependency_name: Mapped[str] = mapped_column(Text, nullable=False)
+    dependency_version: Mapped[Optional[str]] = mapped_column(Text)
+    dependency_flags: Mapped[Optional[str]] = mapped_column(String(10))  # EQ, GE, LE, GT, LT
+    dependency_type: Mapped[str] = mapped_column(String(20), nullable=False)  # requires, provides
+
+    # Relationships
+    scan: Mapped["Scan"] = relationship(back_populates="dependencies")
+
+    __table_args__ = (
+        Index("idx_dep_package", "package_id"),
+        Index("idx_dep_name", "dependency_name"),
+        Index("idx_dep_scan", "scan_id"),
+        Index("idx_dep_product", "product_id"),
+        Index("idx_dep_type", "dependency_type"),
+    )
+
+
+class ComponentRelationship(Base):
+    """Tracks product-to-product composition (e.g., container as component of layered product)."""
+
+    __tablename__ = "component_relationships"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    parent_product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id"), nullable=False
+    )
+    component_product_id: Mapped[int] = mapped_column(
+        ForeignKey("products.id"), nullable=False
+    )
+    relationship_type: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # "layered" or "maintained"
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    parent_product: Mapped["Product"] = relationship(foreign_keys=[parent_product_id])
+    component_product: Mapped["Product"] = relationship(foreign_keys=[component_product_id])
+
+    __table_args__ = (
+        Index("idx_cr_parent", "parent_product_id"),
+        Index("idx_cr_component", "component_product_id"),
+        UniqueConstraint(
+            "parent_product_id",
+            "component_product_id",
+            name="uq_parent_component",
+        ),
     )
 
 
