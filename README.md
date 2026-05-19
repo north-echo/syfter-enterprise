@@ -1,40 +1,34 @@
-# Syfter Enterprise
+# Syfter
 
-A fork of [syfter](https://github.com/vdanen/syfter) hardened for multi-team, large-scale SBOM management.
+A fork of [syfter](https://github.com/vdanen/syfter) hardened for multi-team, large-scale SBOM management. Adds authentication, rate limiting, response caching, RPM dependency tracking, cross-product tracing, container attestation indexing, and query performance fixes for 20M+ package deployments.
 
-## Why This Fork?
+## What This Fork Adds
 
-Syfter is a solid single-user SBOM tool. We deployed it as a centralized service scanning 3,200+ RPM repositories (11M+ packages) for multiple teams and hit scaling limits:
-
-| Problem | Upstream | Enterprise |
-|---------|----------|------------|
-| **Authentication** | None — API is open | Built-in API key auth with per-team keys, admin management endpoints |
-| **Rate limiting** | None | Token-bucket rate limiter per API key (60/min queries, 10/min uploads) |
-| **Products list** | Sequential COUNT queries (N+1) | LATERAL join with index scans — **16s → 0.4s** |
-| **Package search** | Full table scan + JOIN + sort | Subquery-first pattern with COLLATE "C" index — **30s timeout → 0.2s** |
+| Capability | Upstream | This Fork |
+|------------|----------|-----------|
+| **Authentication** | None | API key auth (SHA-256, DB-backed) with per-team keys and admin management |
+| **Rate limiting** | None | Per-key token bucket (60/min queries, 10/min uploads) |
 | **Response caching** | None | In-process cache with auto-invalidation on mutations |
-| **Job queue** | Async upload with FK violations | Removed — direct upload only |
-| **Object storage** | MinIO (self-hosted S3) | Native AWS S3 via IRSA |
+| **RPM dependency tracking** | None | 504M requires/provides relationships, queryable by package or dependency name |
+| **Cross-product tracing** | None | `syfter trace` follows a package from RHEL repos through UBI base images into layered containers |
+| **Attestation indexing** | None | Cosign SLSA provenance and SPDX document attestation metadata |
+| **Component relationships** | None | Product-to-product composition mappings |
+| **Products list** | N+1 COUNT queries | LATERAL join -- **16s to 0.4s** |
+| **Package search** | Full table scan + sort | Subquery-first with COLLATE "C" index -- **30s timeout to 0.2s** |
+| **Dependency search** | N/A | Composite index + PK sort -- **< 1s** across 504M rows |
+| **Stats endpoint** | 5x COUNT(*) on large tables | Materialized view -- **16s to 97ms** |
+| **Job queue** | Async with FK violations | Removed -- direct upload only |
 
-Everything that works well in upstream syfter (scanning, SBOM enrichment, export, container layer tracking) is preserved unchanged.
+All upstream features (scanning, SBOM enrichment, export, container layer tracking) are preserved.
 
-## What Changed
+## Current Scale
 
-### Added
-- **`server/auth.py`** — API key authentication middleware + admin key management endpoints
-- **`server/middleware.py`** — Rate limiting (token bucket) and response caching middleware
-- **`alembic/`** — Database migrations for schema changes
-
-### Modified
-- **`server/api/products.py`** — Raw SQL with LATERAL joins for product counts
-- **`server/api/queries.py`** — Subquery-first-then-JOIN pattern for all search endpoints; COLLATE "C" ordering for index-compatible sorts
-- **`server/api/layers.py`** — Same subquery optimization for layer search
-- **`server/config.py`** — Auth, rate limit, and cache configuration via environment variables
-- **`server/main.py`** — Middleware registration, admin key seeding on startup, version bump
-
-### Removed
-- **`server/api/jobs.py`** — Async job queue (caused FK violations, unnecessary for direct uploads)
-- All job-related schemas, models, CLI commands, and client methods
+Tested in production with:
+- 20.8 million packages
+- 504 million RPM dependency relationships
+- 7,557 products (RPM repos + container images + middleware)
+- 1,038 cosign attestation records
+- All query endpoints < 2 seconds
 
 ## Quick Start
 
@@ -51,7 +45,7 @@ python -m uvicorn server.main:app --host 0.0.0.0 --port 8000
 curl http://localhost:8000/health
 
 # Create a team key
-curl -X POST http://localhost:8000/api/v1/admin/keys \
+curl -X POST http://localhost:8000/api/v1/admin/keys/ \
   -H "X-API-Key: $SYFTER_ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"team_name": "security"}'
@@ -63,6 +57,66 @@ syfter products
 syfter query -n "openssl%"
 ```
 
+## CLI
+
+The CLI extends upstream with `trace` and `deps` commands:
+
+```bash
+export SYFTER_SERVER=https://your-server.example.com
+export SYFTER_API_KEY=your-team-key
+
+# Standard commands (same as upstream)
+syfter scan /path/to/rpms -p rhel -v 10.1
+syfter query -n "openssl%"
+syfter products
+syfter export -p rhel -v 10.0 -f spdx-json -o rhel.spdx.json
+
+# Trace a package across the product stack
+syfter trace openssl-libs
+
+# Query RPM dependencies
+syfter deps openssl-libs                          # what requires openssl-libs?
+syfter deps --package curl --type requires        # what does curl require?
+syfter deps openssl-libs -p rhel -v 9.6           # scoped to a product
+
+# Component relationships
+syfter relationships
+```
+
+## API Endpoints
+
+All endpoints require API key authentication via `X-API-Key` header except `/health`.
+
+### Query
+- `GET /health` -- Health check (no auth)
+- `GET /api/v1/query/stats` -- Database statistics (cached)
+- `GET /api/v1/query/packages?name=<pattern>` -- Package search (LIKE patterns)
+- `GET /api/v1/query/dependencies?package_name=&dependency_type=` -- RPM dependency search
+- `GET /api/v1/query/provenance/{product}/{version}?package_name=` -- Cross-product provenance
+- `GET /api/v1/products` -- Product listing (paginated, cached)
+
+### Container Layers
+- `GET /api/v1/layers/{product}/{version}` -- Layer chain for a container
+- `GET /api/v1/layers/{product}/{version}/packages?layer_type=base` -- Packages by layer
+- `GET /api/v1/layers/{product}/{version}/base-image` -- Base image identification
+- `POST /api/v1/layers/enrich` -- Batch layer enrichment
+
+### Attestations
+- `GET /api/v1/products/{product}/{version}/attestations` -- Cosign attestation metadata
+
+### Relationships
+- `GET /api/v1/relationships/` -- List component relationships
+- `POST /api/v1/relationships/` -- Create relationship
+- `DELETE /api/v1/relationships/{id}` -- Delete relationship
+
+### Admin
+- `POST /api/v1/admin/keys/` -- Create API key
+- `GET /api/v1/admin/keys/` -- List API keys
+- `DELETE /api/v1/admin/keys/{id}` -- Revoke API key
+
+### Upload
+- `POST /api/v1/scans/upload` -- Upload scan results (multipart, supports `dependencies_json`, `image_layers_json`, `attestation_json`)
+
 ## Configuration
 
 All settings via environment variables (same as upstream, plus these):
@@ -70,30 +124,17 @@ All settings via environment variables (same as upstream, plus these):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SYFTER_AUTH_ENABLED` | `true` | Enable API key authentication |
-| `SYFTER_ADMIN_API_KEY` | — | Seed key for initial admin access |
+| `SYFTER_ADMIN_API_KEY` | -- | Seed key for initial admin access |
+| `SYFTER_AUTH_CACHE_TTL` | `60` | Auth validation cache TTL (seconds) |
 | `SYFTER_RATE_LIMIT_ENABLED` | `true` | Enable per-key rate limiting |
 | `SYFTER_RATE_LIMIT_QUERY` | `60` | Query requests per minute per key |
+| `SYFTER_RATE_LIMIT_QUERY_BURST` | `20` | Query burst allowance |
 | `SYFTER_RATE_LIMIT_UPLOAD` | `10` | Upload requests per minute per key |
-| `SYFTER_CACHE_ENABLED` | `true` | Enable response caching |
+| `SYFTER_RATE_LIMIT_UPLOAD_BURST` | `5` | Upload burst allowance |
 | `SYFTER_CACHE_STATS_TTL` | `300` | Stats cache TTL (seconds) |
 | `SYFTER_CACHE_PRODUCTS_TTL` | `300` | Products cache TTL (seconds) |
 
 Set `SYFTER_AUTH_ENABLED=false` for local development without keys.
-
-## API Key Management
-
-```bash
-# Create a team key (admin only)
-curl -X POST /api/v1/admin/keys \
-  -H "X-API-Key: $ADMIN_KEY" \
-  -d '{"team_name": "platform", "expires_days": 365}'
-
-# List keys
-curl /api/v1/admin/keys -H "X-API-Key: $ADMIN_KEY"
-
-# Revoke a key
-curl -X DELETE /api/v1/admin/keys/<key-prefix> -H "X-API-Key: $ADMIN_KEY"
-```
 
 ## Database Indexes
 
@@ -109,37 +150,37 @@ CREATE INDEX idx_package_name_pattern ON packages (name text_pattern_ops);
 -- Foreign key lookups for product-scoped counts
 CREATE INDEX idx_packages_product_id ON packages (product_id);
 CREATE INDEX idx_scan_product ON scans (product_id);
+
+-- Dependency queries (package-scoped + type filter)
+CREATE INDEX idx_dep_package_type ON dependencies (package_id, dependency_type);
 ```
 
 ## Deployment
 
-This fork is designed for OpenShift/Kubernetes. See the deployment repo for:
-- Deployment manifests (Deployment, Service, Route, NetworkPolicy)
-- OpenShift BuildConfig for container builds
-- PostgreSQL StatefulSet configuration
-- Keycloak OIDC integration for browser access
-- AWS S3 + IRSA setup
+This fork is designed for OpenShift/Kubernetes. The container image is built from `podman/Containerfile`.
 
-The container image is built from `podman/Containerfile` (same as upstream).
+A typical deployment includes:
+- Syfter API (Deployment with oauth2-proxy sidecar for browser OIDC)
+- PostgreSQL (StatefulSet)
+- Keycloak (OIDC provider for browser access)
+- AWS S3 via IRSA (SBOM object storage)
 
-## Upstream Compatibility
+## Upstream PRs
 
-The CLI client (`syfter` command) is fully compatible. Set `SYFTER_API_KEY` for authenticated access:
-
-```bash
-export SYFTER_SERVER=https://your-server.example.com
-export SYFTER_API_KEY=your-team-key
-syfter scan /path/to/rpms -p rhel -v 10.1
-syfter query -n "kernel%"
-syfter products
-```
-
-All upstream features (scanning, export, container layer tracking, system mode) work identically.
+| PR | Description | Status |
+|----|-------------|--------|
+| #3 | Remote URL scanning | Merged |
+| #4 | Server-side remote scanning | Merged |
+| #5 | Gzip validation fix | Merged |
+| #6 | Jobs FK cleanup on scan replacement | Merged |
+| #7 | API key auth support in CLI | Merged |
+| #9 | CLI restructure, trace command, dependency tracking, OOM fix | Merged |
+| #17 | Dependency query PK sort fix | Open |
 
 ## License
 
-Apache License 2.0 — same as upstream syfter.
+Apache License 2.0 -- same as upstream syfter.
 
 ## Credits
 
-Based on [syfter](https://github.com/vdanen/syfter) by Vincent Danen. The upstream project does the heavy lifting of SBOM generation, enrichment, and container layer analysis. This fork adds the operational scaffolding for running it as a shared enterprise service.
+Based on [syfter](https://github.com/vdanen/syfter) by Vincent Danen.
